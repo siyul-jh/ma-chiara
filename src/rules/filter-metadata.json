@@ -1,0 +1,20 @@
+{
+  "generatedAt": "2026-07-13T12:40:35.971Z",
+  "sources": [
+    "EasyList",
+    "EasyPrivacy"
+  ],
+  "attribution": "EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed",
+  "rulesetFileCount": 6,
+  "networkRulesConverted": 30000,
+  "networkRegexRules": 0,
+  "networkRulesDropped": 2,
+  "cosmeticSelectorsExtracted": 13465,
+  "cosmeticRulesSkipped": 682,
+  "totalNetworkRules": 30000,
+  "totalRegexFilterRules": 0,
+  "caps": {
+    "maxEnabledStaticRules": 30000,
+    "maxRegexFilterRules": 1000
+  }
+}

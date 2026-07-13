@@ -1,0 +1,30 @@
+{
+  "name": "ma-chiara",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chrome MV3 ad remover extension: network + cosmetic ad blocking, scroll-unlock, element picker, per-domain whitelist/blacklist.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:filters": "tsx scripts/build-filter-rules.ts",
+    "build": "npm run build:filters && tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@adguard/tsurlfilter": "^5.0.1",
+    "@crxjs/vite-plugin": "^2.7.1",
+    "@types/chrome": "^0.2.2",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4"
+  }
+}
