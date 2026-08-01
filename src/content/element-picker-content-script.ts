@@ -1,6 +1,6 @@
 // 요소 선택기 콘텐츠 스크립트.
 //
-// "toggle-element-picker" 단축키(Alt+Shift+P, manifest.ts 참고)와 팝업의
+// "toggle-element-picker" 단축키(Alt+Shift+X, manifest.ts 참고)와 팝업의
 // "요소 선택 시작" 버튼으로 토글된다. chrome.commands.onCommand는 백그라운드
 // 서비스 워커에서만 발생하므로, 워커가 런타임 메시지
 // ({ type: "toggle-element-picker" })를 활성 탭에 전달하고 여기서 수신한다.
@@ -17,7 +17,6 @@ import {
   getCustomRemovedElements,
   getDomainRules,
   getEnabled,
-  incrementStats,
   type DomainRuleEntry,
 } from "../lib/storage";
 import { findMatchingDomainPattern } from "../lib/domain-matcher";
@@ -34,15 +33,29 @@ const OVERLAY_ID = "__ma-chiara-element-picker-overlay__";
  * 피하기 위해 의도적으로 가장 짧은 선택자를 쓰지 않는다.
  */
 function buildNthChildPathSelector(element: Element): string {
+  if (element === document.body) return "body";
+  if (element === document.documentElement) return "html";
+
   const segments: string[] = [];
   let current: Element | null = element;
-  while (current && current !== document.body && current.parentElement) {
+  let reachedBody = false;
+
+  while (current && current.parentElement) {
+    if (current === document.body) {
+      reachedBody = true;
+      break;
+    }
     const parent: Element = current.parentElement;
     const index = Array.prototype.indexOf.call(parent.children, current) + 1;
     segments.unshift(`${current.tagName.toLowerCase()}:nth-child(${index})`);
     current = parent;
   }
-  return `body > ${segments.join(" > ")}`;
+
+  if (segments.length === 0) {
+    throw new Error("유효하지 않은 요소 선택");
+  }
+
+  return reachedBody ? `body > ${segments.join(" > ")}` : segments.join(" > ");
 }
 
 let pickerActive = false;
@@ -93,7 +106,20 @@ async function removeSelectorFromDom(selector: string): Promise<void> {
     }
   }
   if (removedCount > 0) {
-    await incrementStats(location.hostname, { cosmeticRemoved: removedCount });
+    // 통계 갱신은 탭 간 경쟁을 피하기 위해 서비스 워커에서만 직렬화해 쓴다.
+    // sendMessage는 컨텍스트 무효화 시 동기적으로 던지고 워커가 응답하지
+    // 않으면 프로미스로 거부하므로 양쪽 다 삼킨다.
+    try {
+      void chrome.runtime
+        .sendMessage({
+          type: "report-cosmetic-count",
+          hostname: location.hostname,
+          count: removedCount,
+        })
+        .catch(() => undefined);
+    } catch {
+      // 확장 프로그램 재시작 등 — 통계는 최선-노력.
+    }
   }
 }
 
@@ -159,7 +185,7 @@ function mountOverlay(): void {
   overlayEl.style.boxShadow = "0 2px 8px rgba(0,0,0,0.3)";
   overlayEl.style.pointerEvents = "none";
   overlayEl.textContent = "요소 선택기: 제거할 요소를 클릭하세요 (Esc로 취소)";
-  document.documentElement.appendChild(overlayEl);
+  (document.body ?? document.documentElement).appendChild(overlayEl);
 }
 
 function unmountOverlay(): void {
@@ -194,17 +220,24 @@ function togglePicker(): void {
   }
 }
 
+// 진단 로그: 원인 불명의 "요소 선택기가 반응 없음" 문제를 추적하기 위해
+// 당분간 남겨둔다. 페이지 콘솔(서비스 워커 콘솔이 아니라)에서 확인한다.
+console.log("[마! 치아라] 요소 선택기 콘텐츠 스크립트 로드됨:", location.href);
+
 chrome.runtime.onMessage.addListener((message: { type?: string }) => {
   if (message?.type !== "toggle-element-picker") return;
+  console.log("[마! 치아라] toggle-element-picker 메시지 수신");
   // allOff/비활성화된 도메인은 확장 프로그램이 설치되지 않은 것처럼 동작해야
   // 하므로, 선택기도 여기서 활성화되어서는 안 된다.
   void (async () => {
     const [enabled, entry] = await Promise.all([getEnabled(), matchingEntry()]);
+    console.log("[마! 치아라] enabled:", enabled, "| allOff:", entry?.allOff);
     if (!enabled || entry?.allOff) {
       deactivatePicker();
       return;
     }
     togglePicker();
+    console.log("[마! 치아라] pickerActive:", pickerActive);
   })();
 });
 
@@ -219,12 +252,16 @@ async function reapplyPersistedSelectors(): Promise<void> {
   }
 }
 
-void reapplyPersistedSelectors();
+function runReapply(): void {
+  void reapplyPersistedSelectors().catch((error: unknown) => {
+    console.error("[마! 치아라] 저장된 제거 요소를 다시 적용하지 못했습니다.", error);
+  });
+}
+
+runReapply();
 
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) {
-    void reapplyPersistedSelectors();
+    runReapply();
   }
 });
-
-export {};

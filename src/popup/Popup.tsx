@@ -4,12 +4,14 @@ import {
   getDomainStats,
   getEnabled,
   onStorageChange,
-  setEnabled,
+  setDomainRuleAllOff,
   setObservedRules,
+  upsertDomainRule,
   type DiscoveredNetworkRule,
   type DomainStats,
 } from "../lib/storage";
 import { findMatchingDomainPattern } from "../lib/domain-matcher";
+import { sendToggleElementPicker } from "../lib/element-picker-injector";
 
 const COLORS = {
   bg: "#FAFAF9",
@@ -31,7 +33,17 @@ async function getCurrentSite(): Promise<CurrentSite | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.url) return undefined;
   try {
-    const hostname = new URL(tab.url).hostname;
+    const url = new URL(tab.url);
+    if (
+      url.protocol === "chrome:" ||
+      url.protocol === "chrome-extension:" ||
+      url.protocol === "about:" ||
+      url.protocol === "edge:" ||
+      url.hostname === "chromewebstore.google.com"
+    ) {
+      return undefined;
+    }
+    const hostname = url.hostname;
     if (!hostname) return undefined;
     return { hostname, tabId: tab.id };
   } catch {
@@ -41,22 +53,21 @@ async function getCurrentSite(): Promise<CurrentSite | undefined> {
 
 async function startElementPicker(tabId: number | undefined): Promise<void> {
   if (tabId === undefined) return;
-  await chrome.tabs.sendMessage(tabId, { type: "toggle-element-picker" });
-  window.close();
+  try {
+    await sendToggleElementPicker(tabId);
+    window.close();
+  } catch (error) {
+    // 정말로 주입 불가능한 페이지 (chrome://, 웹 스토어, PDF 뷰어 등) — 무시.
+    console.error("[마! 치아라] 요소 선택기 메시지 전송 실패:", error);
+  }
 }
 
-interface RuleCondition {
-  regexFilter?: string;
-  urlFilter?: string;
-  description: string;
-}
-
-// rule-conditions.json은 3만 개 이상의 규칙(~2.3MB)을 담고 있어, 클릭해서
-// 여는 팝업에서 최상위 정적 import로 받아들일 수 없다. 실제로 필요할 때만
-// 동적 import로 지연 로딩한다.
-async function loadRuleConditions(): Promise<Record<string, RuleCondition>> {
-  const mod = await import("../rules/rule-conditions.json");
-  return mod.default as Record<string, RuleCondition>;
+// 규칙 설명 데이터는 전량 9MB라 팝업에서 직접 읽으면 창이 뜨지 않는다.
+// 서비스 워커가 필요한 조각만 읽어 설명 문자열만 돌려준다.
+async function describeRules(ruleIds: readonly number[]): Promise<Record<string, string>> {
+  if (ruleIds.length === 0) return {};
+  const response: unknown = await chrome.runtime.sendMessage({ type: "describe-rules", ruleIds });
+  return typeof response === "object" && response !== null ? (response as Record<string, string>) : {};
 }
 
 /**
@@ -69,15 +80,14 @@ async function discoverMatchedRules(tabId: number | undefined, hostname: string)
   if (tabId === undefined) return;
   try {
     const { rulesMatchedInfo } = await chrome.declarativeNetRequest.getMatchedRules({ tabId });
-    const ruleConditions = await loadRuleConditions();
+    const ruleIds = [...new Set(rulesMatchedInfo.map((info) => info.rule.ruleId))];
+    const descriptions = await describeRules(ruleIds);
     const now = Date.now();
     const byId = new Map<number, DiscoveredNetworkRule>();
-    for (const info of rulesMatchedInfo) {
-      const ruleId = info.rule.ruleId;
-      const condition = ruleConditions[String(ruleId)];
+    for (const ruleId of ruleIds) {
       byId.set(ruleId, {
         ruleId,
-        description: condition?.description ?? String(ruleId),
+        description: descriptions[String(ruleId)] ?? String(ruleId),
         lastSeenAt: now,
       });
     }
@@ -122,13 +132,28 @@ export function Popup() {
     return onStorageChange(() => refresh());
   }, [refresh]);
 
-  const handleToggleEnabled = useCallback(async () => {
-    await setEnabled(!enabled);
-    setEnabledState(!enabled);
-  }, [enabled]);
+  // 사이트 단위 스위치다. 전역 enabled를 건드리면 다른 모든 사이트까지 함께
+  // 꺼지므로, 현재 호스트명에 매칭되는 DomainRuleEntry의 allOff만 토글한다.
+  const handleToggleSiteBlocking = useCallback(async () => {
+    if (!site) return;
+    const domainRules = await getDomainRules();
+    const matchedPattern = findMatchingDomainPattern(site.hostname, Object.keys(domainRules));
+    const pattern = matchedPattern ?? site.hostname;
+    if (!matchedPattern) {
+      await upsertDomainRule(site.hostname);
+    }
+    const nextAllOff = !allOff;
+    await setDomainRuleAllOff(pattern, nextAllOff);
+    setAllOff(nextAllOff);
+  }, [site, allOff]);
 
-  const approxBlocked = stats.networkBlocked + stats.cosmeticRemoved;
+  // 네트워크 차단 수는 세지 않는다 — MV3 프로덕션에서 탭별 집계를 제공하는
+  // onRuleMatchedDebug가 개발 모드 전용이라 항상 0이 된다. 0을 더해 보여주면
+  // 실제로는 콘텐츠 요소 수인데 네트워크까지 합산한 것처럼 읽힌다.
+  const hiddenElements = stats.cosmeticRemoved;
   const siteActive = enabled && !allOff;
+  // 선택기는 콘텐츠 스크립트가 비활성인 상태에서 호출해도 무시되므로 미리 막는다.
+  const pickerAvailable = Boolean(site) && siteActive;
   const statusColor = allOff ? COLORS.muted : siteActive ? COLORS.active : COLORS.muted;
   const statusSoft = allOff ? COLORS.mutedSoft : siteActive ? COLORS.activeSoft : COLORS.mutedSoft;
 
@@ -203,8 +228,9 @@ export function Popup() {
             >
               <input
                 type="checkbox"
-                checked={enabled}
-                onChange={handleToggleEnabled}
+                checked={!allOff}
+                disabled={!site || !enabled}
+                onChange={handleToggleSiteBlocking}
                 style={{ width: 18, height: 18, accentColor: COLORS.active, cursor: "pointer" }}
               />
             </label>
@@ -218,7 +244,7 @@ export function Popup() {
               background: COLORS.ink,
               color: "#fff",
             }}
-            title="추정치입니다 — Chrome Manifest V3 API는 프로덕션 빌드에서 탭별 정확한 차단 요청 수를 제공하지 않습니다."
+            title="이 사이트에서 숨긴 광고 요소의 누적 개수입니다. 네트워크 요청 차단 수는 Chrome Manifest V3가 배포 빌드에서 탭별 집계를 제공하지 않아 표시할 수 없습니다."
           >
             <div
               style={{
@@ -229,24 +255,24 @@ export function Popup() {
                 letterSpacing: "-0.01em",
               }}
             >
-              ~{approxBlocked.toLocaleString()}
+              {hiddenElements.toLocaleString()}
             </div>
-            <div style={{ color: "#A1A1AA", fontSize: 11, marginTop: 5 }}>이 사이트에서 차단됨 (추정치)</div>
+            <div style={{ color: "#A1A1AA", fontSize: 11, marginTop: 5 }}>이 사이트에서 숨긴 광고 요소 (누적)</div>
           </div>
 
           <button
             type="button"
             onClick={() => startElementPicker(site?.tabId)}
-            disabled={!site || allOff}
+            disabled={!pickerAvailable}
             style={{
               width: "100%",
               padding: "9px 10px",
               marginBottom: 4,
               borderRadius: 8,
-              border: `1px solid ${site && !allOff ? COLORS.ink : COLORS.border}`,
-              background: site && !allOff ? COLORS.ink : COLORS.mutedSoft,
-              color: site && !allOff ? "#fff" : COLORS.muted,
-              cursor: site && !allOff ? "pointer" : "not-allowed",
+              border: `1px solid ${pickerAvailable ? COLORS.ink : COLORS.border}`,
+              background: pickerAvailable ? COLORS.ink : COLORS.mutedSoft,
+              color: pickerAvailable ? "#fff" : COLORS.muted,
+              cursor: pickerAvailable ? "pointer" : "not-allowed",
               fontSize: 13,
               fontWeight: 600,
               transition: "opacity 0.12s ease",

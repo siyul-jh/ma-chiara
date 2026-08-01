@@ -23,24 +23,37 @@ export default defineManifest({
       128: "icons/icon128.png",
     },
   },
-  options_page: "src/options/index.html",
+  options_ui: {
+    page: "src/options/index.html",
+    open_in_tab: true,
+  },
   background: {
     service_worker: "src/background/service-worker.ts",
     type: "module",
   },
-  permissions: ["declarativeNetRequest", "storage", "activeTab", "scripting", "commands"],
+  // "commands"는 permission이 아니라 아래의 최상위 매니페스트 키다 — permissions에
+  // 넣으면 Chrome이 알 수 없는 권한으로 보고 로드 시 경고를 띄운다.
+  // "alarms"는 코스메틱 필터를 하루 한 번 갱신하는 주기 실행에 쓴다.
+  // "scripting"은 요소 선택기 토글 메시지가 실패했을 때(확장 프로그램을
+  // 리로드한 뒤 새로고침하지 않은 탭 등, 콘텐츠 스크립트가 없는 경우) activeTab
+  // 권한으로 즉시 재주입하기 위해 필요하다.
+  permissions: ["declarativeNetRequest", "storage", "activeTab", "alarms", "scripting"],
   host_permissions: ["<all_urls>"],
   declarative_net_request: {
+    // 보장 최소치(30,000) 안에 들어가는 룰셋만 켠 채로 배포한다. 나머지는
+    // 전역 풀에서 가져와야 하는데 가용량이 다른 확장 프로그램에 따라 달라지므로,
+    // 켠 채로 설치하면 풀이 차 있을 때 Chrome이 로드를 거부해 차단이 통째로
+    // 죽는다. 서비스 워커가 실제 가용량을 확인한 뒤 추가로 켠다.
     rule_resources: Array.from({ length: filterMetadata.rulesetFileCount }, (_, i) => ({
       id: `ruleset-${i + 1}`,
-      enabled: true,
+      enabled: i < filterMetadata.coreRulesetCount,
       path: `src/rules/dnr-ruleset-${i + 1}.json`,
     })),
   },
   commands: {
     "toggle-element-picker": {
       suggested_key: {
-        default: "Alt+Shift+P",
+        default: "Alt+Shift+X",
       },
       description: "Toggle the element picker",
     },

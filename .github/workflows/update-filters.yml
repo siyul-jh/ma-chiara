@@ -1,0 +1,64 @@
+# 정적 DNR 룰셋은 확장 프로그램 패키지의 일부라 런타임에 바꿀 수 없다.
+# 네트워크 차단 규칙을 갱신하는 유일한 경로는 재빌드 후 새 버전을 배포하는
+# 것이므로, 필터 목록을 주기적으로 다시 받아 변경이 있을 때만 커밋한다.
+name: 필터 목록 갱신
+
+on:
+  schedule:
+    # 매주 일요일 03:00 KST (18:00 UTC 토요일)
+    - cron: "0 18 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-filters
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      # .cache/는 커밋되지 않으므로 여기서 항상 원본 목록을 새로 내려받는다.
+      - name: 필터 목록 재빌드
+        run: npm run build:filters
+
+      - name: 변경 여부 확인
+        id: diff
+        run: |
+          # generatedAt 타임스탬프는 매번 바뀌므로 판단 기준에서 제외한다.
+          if git diff --quiet -- src/rules ':!src/rules/filter-metadata.json'; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "필터 목록에 실질적인 변경이 없습니다."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat -- src/rules ':!src/rules/filter-metadata.json'
+          fi
+
+      # 갱신된 규칙으로 린트·타입체크·테스트·빌드가 모두 통과하는지 확인한 뒤에만
+      # 커밋한다. 상류 목록이 깨진 채로 배포되는 것을 막는 게 목적이다.
+      - name: 검증
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          npm run check
+          npm run build
+
+      - name: 버전 올리고 커밋
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version patch --no-git-tag-version
+          git add package.json package-lock.json src/rules
+          git commit -m "chore: 필터 목록 갱신"
+          git push

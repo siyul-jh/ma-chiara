@@ -1,7 +1,25 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
-.DS_Store
-*.local
+
+# Local cache & temporary directories
 .cache/
 .omc/
 .history/
+.claude/
+
+# Logs
+*.log
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local env files
+*.local
+.env*.local
+

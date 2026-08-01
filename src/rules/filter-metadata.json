@@ -1,20 +1,31 @@
 {
-  "generatedAt": "2026-07-13T12:40:35.971Z",
+  "generatedAt": "2026-07-31T13:24:59.631Z",
   "sources": [
     "EasyList",
     "EasyPrivacy"
   ],
   "attribution": "EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed",
-  "rulesetFileCount": 6,
-  "networkRulesConverted": 30000,
+  "rulesetFileCount": 4,
+  "coreRulesetCount": 1,
+  "rulesetRuleCounts": [
+    30000,
+    30000,
+    30000,
+    17742
+  ],
+  "rulesPerRulesetFile": 30000,
+  "networkRulesConverted": 107742,
   "networkRegexRules": 0,
-  "networkRulesDropped": 2,
+  "networkRulesDropped": 0,
   "cosmeticSelectorsExtracted": 13465,
+  "cosmeticDomainsExtracted": 7681,
   "cosmeticRulesSkipped": 682,
-  "totalNetworkRules": 30000,
+  "totalNetworkRules": 107742,
+  "coreNetworkRules": 30000,
   "totalRegexFilterRules": 0,
   "caps": {
-    "maxEnabledStaticRules": 30000,
-    "maxRegexFilterRules": 1000
+    "guaranteedStaticRules": 30000,
+    "maxRegexFilterRules": 1000,
+    "maxStaticRulesets": 100
   }
 }

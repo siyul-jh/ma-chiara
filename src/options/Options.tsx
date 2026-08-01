@@ -4,18 +4,22 @@ import {
   clearDomainStatsForHostnames,
   getAllCustomRemovedElements,
   getDomainRules,
+  getEnabled,
+  getFilterUpdate,
   getObservedRules,
   getStats,
   onStorageChange,
   removeCustomRemovedElement,
   removeDomainRule,
   setDomainRuleAllOff,
+  setEnabled,
   toggleDisabledRuleId,
   upsertDomainRule,
   type AggregateStats,
   type CustomRemovedElement,
   type DiscoveredNetworkRule,
   type DomainRuleEntry,
+  type FilterUpdateState,
 } from "../lib/storage";
 import { isValidDomainPattern, matchesDomainPattern } from "../lib/domain-matcher";
 import filterMetadata from "../rules/filter-metadata.json";
@@ -37,6 +41,16 @@ const COLORS = {
   dangerSoft: "#FEF2F2",
   zebra: "#FAFAFA",
 };
+
+/**
+ * React 이벤트 핸들러는 반환된 프로미스를 무시하므로, async 핸들러가 실패하면
+ * 처리되지 않은 거부로 남는다. 저장 실패를 조용히 흘려보내지 않도록 감싼다.
+ */
+function runAction(action: Promise<unknown>): void {
+  void action.catch((error: unknown) => {
+    console.error("[마! 치아라] 설정을 저장하지 못했습니다.", error);
+  });
+}
 
 function Card({ children, style }: { children: ReactNode; style?: CSSProperties }) {
   return (
@@ -65,14 +79,19 @@ function SectionHeading({ title, description }: { title: string; description: st
   );
 }
 
+// 기본 tone이 danger인 이유: 기존 스위치들은 모두 "켜면 차단이 풀린다"는
+// 의미라 켜진 상태가 경고색이어야 한다. 반대로 전역 사용 스위치는 켜진
+// 상태가 정상이므로 active를 쓴다.
 function ToggleSwitch({
   checked,
   onChange,
   label,
+  tone = "danger",
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   label?: string;
+  tone?: "danger" | "active";
 }) {
   return (
     <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
@@ -84,7 +103,7 @@ function ToggleSwitch({
           width: 38,
           height: 22,
           borderRadius: 11,
-          background: checked ? COLORS.danger : COLORS.border,
+          background: checked ? (tone === "active" ? COLORS.active : COLORS.danger) : COLORS.border,
           position: "relative",
           transition: "background 0.15s ease",
           cursor: "pointer",
@@ -114,10 +133,16 @@ function ShortcutStatus() {
   const [checked, setChecked] = useState(false);
 
   useEffect(() => {
-    void chrome.commands.getAll().then((commands) => {
+    let cancelled = false;
+    void (async () => {
+      const commands = await chrome.commands.getAll();
+      if (cancelled) return;
       setShortcut(commands.find((c) => c.name === "toggle-element-picker")?.shortcut);
       setChecked(true);
-    });
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const isAssigned = checked && !!shortcut;
@@ -182,6 +207,94 @@ function ShortcutStatus() {
   );
 }
 
+function FilterUpdateStatus() {
+  const [state, setState] = useState<FilterUpdateState | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const current = await getFilterUpdate();
+      if (!cancelled) setState(current);
+    })();
+    return onStorageChange((changes) => {
+      if (changes.filterUpdate) {
+        void getFilterUpdate().then((current) => setState(current));
+      }
+    });
+  }, []);
+
+  const handleUpdate = useCallback(async () => {
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      const outcome: unknown = await chrome.runtime.sendMessage({ type: "update-filters" });
+      setMessage(
+        outcome === "updated"
+          ? "필터 목록을 갱신했습니다."
+          : outcome === "unchanged"
+            ? "이미 최신 상태입니다."
+            : "갱신에 실패했습니다. 네트워크 상태를 확인해 주세요.",
+      );
+    } catch {
+      setMessage("갱신에 실패했습니다.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const addedCount = state?.addedGenericSelectors.length ?? 0;
+  const domainCount = state ? Object.keys(state.domainSelectors).length : 0;
+
+  return (
+    <div
+      style={{
+        marginTop: 14,
+        paddingTop: 14,
+        borderTop: `1px solid ${COLORS.border}`,
+        display: "flex",
+        alignItems: "flex-start",
+        justifyContent: "space-between",
+        gap: 16,
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 4 }}>코스메틱 필터 자동 갱신</div>
+        <p style={{ color: COLORS.sub, fontSize: 11.5, margin: 0, lineHeight: 1.6, maxWidth: 460 }}>
+          {state === undefined
+            ? "확인 중…"
+            : state === null
+              ? "아직 갱신한 적이 없습니다. 하루 한 번 자동으로 확인하며, 그전까지는 번들된 필터를 사용합니다."
+              : `최종 갱신 ${new Date(state.updatedAt).toLocaleString()} · 도메인 ${domainCount.toLocaleString()}개, 새 범용 선택자 ${addedCount.toLocaleString()}개`}
+        </p>
+        {message && (
+          <p style={{ color: COLORS.sub, fontSize: 11.5, margin: "6px 0 0" }}>{message}</p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => runAction(handleUpdate())}
+        disabled={busy}
+        style={{
+          flexShrink: 0,
+          padding: "7px 12px",
+          borderRadius: 8,
+          border: `1px solid ${busy ? COLORS.border : COLORS.ink}`,
+          background: busy ? COLORS.mutedSoft : "transparent",
+          color: busy ? COLORS.muted : COLORS.ink,
+          cursor: busy ? "not-allowed" : "pointer",
+          fontSize: 12,
+          fontWeight: 600,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {busy ? "갱신 중…" : "지금 갱신"}
+      </button>
+    </div>
+  );
+}
+
 function AddPatternInput({ onAdd }: { onAdd: (pattern: string) => Promise<void> }) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
@@ -205,7 +318,7 @@ function AddPatternInput({ onAdd }: { onAdd: (pattern: string) => Promise<void> 
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") handleAdd();
+            if (e.key === "Enter") runAction(handleAdd());
           }}
           placeholder="도메인 패턴(와일드카드), 예: naver*.com"
           style={{
@@ -220,7 +333,7 @@ function AddPatternInput({ onAdd }: { onAdd: (pattern: string) => Promise<void> 
         />
         <button
           type="button"
-          onClick={handleAdd}
+          onClick={() => runAction(handleAdd())}
           style={{
             padding: "8px 18px",
             borderRadius: 8,
@@ -280,7 +393,7 @@ function ObservedRulesSubsection({
                   >
                     <ToggleSwitch
                       checked={isUnblocked}
-                      onChange={(checked) => void onToggleRuleId(rule.ruleId, checked)}
+                      onChange={(checked) => runAction(onToggleRuleId(rule.ruleId, checked))}
                     />
                   </td>
                 </tr>
@@ -335,7 +448,7 @@ function CustomElementsSubsection({
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, textAlign: "right", width: 70 }}>
                         <button
                           type="button"
-                          onClick={() => onRemove(hostname, el.selector)}
+                          onClick={() => runAction(onRemove(hostname, el.selector))}
                           style={{ border: "none", background: "transparent", color: COLORS.danger, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
                         >
                           삭제
@@ -416,10 +529,10 @@ function DomainRuleCard({
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
-          <ToggleSwitch checked={entry.allOff} onChange={(checked) => void onSetAllOff(entry.pattern, checked)} label="전체 끄기" />
+          <ToggleSwitch checked={entry.allOff} onChange={(checked) => runAction(onSetAllOff(entry.pattern, checked))} label="전체 끄기" />
           <button
             type="button"
-            onClick={() => onDelete(entry.pattern)}
+            onClick={() => runAction(onDelete(entry.pattern))}
             style={{ border: "none", background: "transparent", color: COLORS.danger, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
           >
             삭제
@@ -452,14 +565,16 @@ export function Options() {
   const [observedRules, setObservedRulesState] = useState<Record<string, DiscoveredNetworkRule[]>>({});
   const [customElements, setCustomElements] = useState<Record<string, CustomRemovedElement[]>>({});
   const [stats, setStats] = useState<AggregateStats>({ totalNetworkBlocked: 0, totalCosmeticRemoved: 0, perDomain: {} });
+  const [enabled, setEnabledState] = useState(true);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    const [rules, observed, elements, aggregateStats] = await Promise.all([
+    const [rules, observed, elements, aggregateStats, isEnabled] = await Promise.all([
       getDomainRules(),
       getObservedRules(),
       getAllCustomRemovedElements(),
       getStats(),
+      getEnabled(),
     ]);
 
     // 요소 선택기로 다룬 적이 있는 모든 호스트명은 관리 목록에 나타나야
@@ -479,7 +594,13 @@ export function Options() {
     setObservedRulesState(observed);
     setCustomElements(elements);
     setStats(aggregateStats);
+    setEnabledState(isEnabled);
     setLoading(false);
+  }, []);
+
+  const handleToggleEnabled = useCallback(async (next: boolean) => {
+    await setEnabled(next);
+    setEnabledState(next);
   }, []);
 
   useEffect(() => {
@@ -487,14 +608,35 @@ export function Options() {
     return onStorageChange(() => refresh());
   }, [refresh]);
 
+  // 번들된 규칙 중 실제로 몇 개가 켜졌는지는 브라우저마다 다르다 — 보장분을
+  // 넘는 룰셋은 다른 확장 프로그램과 나눠 쓰는 전역 풀에서 가져오기 때문이다.
+  const [activeNetworkRules, setActiveNetworkRules] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const enabledRulesets = await chrome.declarativeNetRequest.getEnabledRulesets();
+      if (cancelled) return;
+      const counts: readonly number[] = filterMetadata.rulesetRuleCounts;
+      const total = enabledRulesets.reduce((sum, id) => {
+        const index = Number(id.replace("ruleset-", "")) - 1;
+        return sum + (counts[index] ?? 0);
+      }, 0);
+      setActiveNetworkRules(total);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [domainRules]);
+
   const networkRuleCount = filterMetadata.totalNetworkRules;
   const filterBuildDate = new Date(filterMetadata.generatedAt).toLocaleDateString();
   const cosmeticSelectorCount = Array.isArray(cosmeticSelectors) ? cosmeticSelectors.length : 0;
   const perDomainStats = useMemo(
     () =>
-      Object.entries(stats.perDomain).sort(
-        ([, a], [, b]) => b.networkBlocked + b.cosmeticRemoved - (a.networkBlocked + a.cosmeticRemoved),
-      ),
+      Object.entries(stats.perDomain)
+        .filter(([, domainStats]) => domainStats.cosmeticRemoved > 0)
+        .sort(([, a], [, b]) => b.cosmeticRemoved - a.cosmeticRemoved),
     [stats],
   );
 
@@ -523,6 +665,28 @@ export function Options() {
           <p style={{ color: COLORS.sub }}>불러오는 중…</p>
         ) : (
           <>
+            <Card
+              style={{
+                background: enabled ? COLORS.activeSoft : COLORS.dangerSoft,
+                border: `1px solid ${enabled ? "#16A34A33" : "#DC262633"}`,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+                <div>
+                  <h2 style={{ fontSize: 15, fontWeight: 700, margin: "0 0 4px", letterSpacing: "-0.01em" }}>
+                    확장 프로그램 사용
+                  </h2>
+                  <p style={{ color: COLORS.sub, fontSize: 12.5, margin: 0, lineHeight: 1.6, maxWidth: 460 }}>
+                    끄면 모든 사이트에서 차단·제거와 스크롤 잠금 해제가 중단됩니다. 특정 사이트에서만 끄려면
+                    아래 도메인 관리의 &ldquo;전체 끄기&rdquo;를 사용하세요.
+                  </p>
+                </div>
+                <div style={{ flexShrink: 0, paddingTop: 2 }}>
+                  <ToggleSwitch checked={enabled} onChange={(checked) => runAction(handleToggleEnabled(checked))} tone="active" />
+                </div>
+              </div>
+            </Card>
+
             <ShortcutStatus />
 
             <Card>
@@ -572,23 +736,29 @@ export function Options() {
 
             <Card>
               <SectionHeading
-                title="차단 통계 (추정치)"
-                description="Manifest V3는 배포 빌드에서 탭별 정확한 차단 요청 수를 제공하지 않으므로, 아래 수치는 최선의 추정치입니다."
+                title="차단 통계"
+                description="숨긴 광고 요소의 누적 개수입니다. 네트워크 요청 차단 수는 별도로 표시하지 않습니다 — 아래 설명을 참고하세요."
               />
               <div style={{ display: "flex", gap: 12, marginBottom: perDomainStats.length > 0 ? 18 : 0 }}>
                 <div style={{ flex: 1, background: COLORS.bg, border: `1px solid ${COLORS.borderSoft}`, borderRadius: 10, padding: "12px 14px" }}>
                   <div style={{ fontSize: 22, fontWeight: 800, fontFamily: "ui-monospace, monospace", lineHeight: 1 }}>
-                    ~{stats.totalNetworkBlocked.toLocaleString()}
+                    {stats.totalCosmeticRemoved.toLocaleString()}
                   </div>
-                  <div style={{ color: COLORS.sub, fontSize: 11.5, marginTop: 5 }}>총 네트워크 요청 차단</div>
+                  <div style={{ color: COLORS.sub, fontSize: 11.5, marginTop: 5 }}>총 숨긴 광고 요소</div>
                 </div>
                 <div style={{ flex: 1, background: COLORS.bg, border: `1px solid ${COLORS.borderSoft}`, borderRadius: 10, padding: "12px 14px" }}>
-                  <div style={{ fontSize: 22, fontWeight: 800, fontFamily: "ui-monospace, monospace", lineHeight: 1 }}>
-                    ~{stats.totalCosmeticRemoved.toLocaleString()}
+                  <div style={{ fontSize: 22, fontWeight: 800, fontFamily: "ui-monospace, monospace", lineHeight: 1, color: COLORS.muted }}>
+                    —
                   </div>
-                  <div style={{ color: COLORS.sub, fontSize: 11.5, marginTop: 5 }}>총 콘텐츠 요소 제거</div>
+                  <div style={{ color: COLORS.sub, fontSize: 11.5, marginTop: 5 }}>네트워크 요청 차단 (측정 불가)</div>
                 </div>
               </div>
+
+              <p style={{ color: COLORS.sub, fontSize: 11.5, margin: perDomainStats.length > 0 ? "0 0 14px" : 0, lineHeight: 1.6 }}>
+                네트워크 차단은 Chrome이 확장 프로그램 코드를 거치지 않고 직접 처리하므로(declarativeNetRequest),
+                배포 빌드에서는 몇 건이 차단됐는지 셀 수 있는 방법이 없습니다. 차단 자체는 정상 동작하며, 실제로
+                어떤 요청이 걸렸는지는 위 도메인 관리의 &ldquo;자동 차단 항목&rdquo;에서 확인할 수 있습니다.
+              </p>
 
               {perDomainStats.length > 0 && (
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
@@ -598,10 +768,7 @@ export function Options() {
                         도메인
                       </th>
                       <th style={{ textAlign: "right", borderBottom: `1px solid ${COLORS.border}`, padding: "6px 8px", color: COLORS.sub, fontSize: 11.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.02em" }}>
-                        네트워크 차단 (~)
-                      </th>
-                      <th style={{ textAlign: "right", borderBottom: `1px solid ${COLORS.border}`, padding: "6px 8px", color: COLORS.sub, fontSize: 11.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.02em" }}>
-                        콘텐츠 제거 (~)
+                        숨긴 광고 요소
                       </th>
                     </tr>
                   </thead>
@@ -609,9 +776,6 @@ export function Options() {
                     {perDomainStats.map(([hostname, domainStats], i) => (
                       <tr key={hostname} style={{ background: i % 2 === 1 ? COLORS.zebra : "transparent" }}>
                         <td style={{ padding: "7px 8px", borderBottom: `1px solid ${COLORS.borderSoft}` }}>{hostname}</td>
-                        <td style={{ padding: "7px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
-                          {domainStats.networkBlocked.toLocaleString()}
-                        </td>
                         <td style={{ padding: "7px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
                           {domainStats.cosmeticRemoved.toLocaleString()}
                         </td>
@@ -638,6 +802,12 @@ export function Options() {
                     <td style={{ fontFamily: "ui-monospace, monospace" }}>{networkRuleCount.toLocaleString()}</td>
                   </tr>
                   <tr>
+                    <td style={{ padding: "3px 12px 3px 0", color: COLORS.sub }}>현재 활성 규칙 수</td>
+                    <td style={{ fontFamily: "ui-monospace, monospace" }}>
+                      {activeNetworkRules === undefined ? "확인 중…" : activeNetworkRules.toLocaleString()}
+                    </td>
+                  </tr>
+                  <tr>
                     <td style={{ padding: "3px 12px 3px 0", color: COLORS.sub }}>번들된 콘텐츠 선택자 수</td>
                     <td style={{ fontFamily: "ui-monospace, monospace" }}>{cosmeticSelectorCount.toLocaleString()}</td>
                   </tr>
@@ -647,6 +817,8 @@ export function Options() {
                   </tr>
                 </tbody>
               </table>
+
+              <FilterUpdateStatus />
             </Card>
           </>
         )}

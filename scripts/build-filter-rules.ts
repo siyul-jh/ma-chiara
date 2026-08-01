@@ -54,11 +54,20 @@ interface RuleCondition {
 
 // Chrome MV3 정적 룰셋의 구체적인 상한선(declarativeNetRequest).
 // https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest#properties
-const MAX_ENABLED_STATIC_RULES = 30_000;
+// 30,000은 "확장 프로그램마다 경쟁 없이 보장되는 최소치"이지 전체 한도가
+// 아니다. 이를 넘는 규칙은 브라우저 전체가 공유하는 전역 풀에서 가져오며,
+// 실제 가용량은 런타임에 getAvailableStaticRuleCount()로만 알 수 있다.
+// 그래서 변환은 최대한 많이 해두고, 보장분에 해당하는 룰셋만 켠 채로
+// 배포한다. 나머지는 서비스 워커가 가용량을 보고 추가로 켠다.
+const GUARANTEED_STATIC_RULES = 30_000;
+// 변환 단계에서 허용할 총량. 원본 목록을 다 담고도 남을 만큼 잡되, 룰셋
+// 파일 수가 MAX_STATIC_RULESETS를 넘지 않는 선에서 정한다.
+const MAX_TOTAL_STATIC_RULES = 150_000;
 const MAX_REGEX_FILTER_RULES = 1_000;
-// 각 룰셋 파일이 단일 룰셋의 실용적인 크기보다 충분히 작게 유지되면서도
-// 활성화된 전체 합계가 상한선 아래를 유지하도록, 큰 룰셋을 청크로 나눈다.
-const RULES_PER_RULESET_FILE = 5_000;
+const MAX_STATIC_RULESETS = 100;
+// 룰셋 하나가 켜고 끄는 단위다. 작을수록 전역 풀 가용량에 촘촘하게 맞출 수
+// 있지만 파일 수가 늘어난다.
+const RULES_PER_RULESET_FILE = 30_000;
 
 const rootDir = path.resolve(import.meta.dirname, "..");
 const sourcesDir = path.join(rootDir, ".cache", "filter-sources");
@@ -79,6 +88,7 @@ interface BuildStats {
   networkRegexRules: number;
   networkRulesDropped: number;
   cosmeticSelectorsExtracted: number;
+  cosmeticDomainsExtracted: number;
   cosmeticRulesSkipped: number;
 }
 
@@ -113,8 +123,14 @@ function extractCosmeticSelectors(
   rawText: string,
   filterListId: number,
   stats: BuildStats,
-): { selector: string; genericOnly: boolean }[] {
+): {
+  selectors: { selector: string; genericOnly: boolean }[];
+  domainSelectors: Map<string, Set<string>>;
+} {
   const selectors = new Map<string, { selector: string; genericOnly: boolean }>();
+  // EasyList의 `domain.com##selector` 형태에서 나온 도메인 → 선택자 목록.
+  // 키에는 `amazon.*`처럼 TLD 자리에 와일드카드가 오는 형태가 섞여 있다.
+  const domainSelectors = new Map<string, Set<string>>();
   const lines = rawText.split("\n");
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -150,9 +166,15 @@ function extractCosmeticSelectors(
     } else if (existing.genericOnly && !genericOnly) {
       existing.genericOnly = false;
     }
+
+    for (const domain of rule.getPermittedDomains() ?? []) {
+      let set = domainSelectors.get(domain);
+      if (!set) domainSelectors.set(domain, (set = new Set()));
+      set.add(selector);
+    }
   }
 
-  return Array.from(selectors.values());
+  return { selectors: Array.from(selectors.values()), domainSelectors };
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -178,6 +200,7 @@ async function main() {
     networkRegexRules: 0,
     networkRulesDropped: 0,
     cosmeticSelectorsExtracted: 0,
+    cosmeticDomainsExtracted: 0,
     cosmeticRulesSkipped: 0,
   };
 
@@ -187,6 +210,7 @@ async function main() {
   // (또는 컨버터가 해당 id에 대해 소스 규칙을 노출하지 않았다면 undefined).
   const sourceRuleText: (string | undefined)[] = [];
   const cosmeticSelectorSet = new Map<string, { selector: string; genericOnly: boolean }>();
+  const domainCosmeticSelectors = new Map<string, Set<string>>();
 
   for (const source of FILTER_SOURCES) {
     const rawText = await loadFilterSourceText(source.file);
@@ -198,7 +222,7 @@ async function main() {
       true,
     );
 
-    const sourceRuleBudget = Math.floor(MAX_ENABLED_STATIC_RULES * source.ruleBudgetShare);
+    const sourceRuleBudget = Math.floor(MAX_TOTAL_STATIC_RULES * source.ruleBudgetShare);
     const sourceRegexBudget = Math.floor(MAX_REGEX_FILTER_RULES * source.ruleBudgetShare);
 
     const { ruleSet, limitations } = await converter.convertStaticRuleSet(filter, {
@@ -213,14 +237,14 @@ async function main() {
     // id를 받아서 그것을 만들어낸 소스 규칙들을 반환한다; 해당 id에 대한
     // 소스 맵이 없으면 undefined로 대체한다 (나중에 → urlFilter/regexFilter 문자열).
     for (const rule of declarativeRules) {
-      let source: string | undefined;
+      let originalLine: string | undefined;
       try {
         const sources = await ruleSet.getRulesById(rule.id);
-        source = sources.map((s) => s.sourceRule).find((s) => s && s.length > 0);
+        originalLine = sources.map((s) => s.sourceRule).find((s) => s && s.length > 0);
       } catch {
-        source = undefined;
+        originalLine = undefined;
       }
-      sourceRuleText.push(source);
+      sourceRuleText.push(originalLine);
     }
     allDeclarativeRules.push(...declarativeRules);
     stats.networkRulesConverted += ruleSet.getRulesCount();
@@ -234,8 +258,8 @@ async function main() {
       stats.networkRulesDropped += limitations.length;
     }
 
-    const cosmeticSelectors = extractCosmeticSelectors(rawText, source.id, stats);
-    for (const entry of cosmeticSelectors) {
+    const cosmetic = extractCosmeticSelectors(rawText, source.id, stats);
+    for (const entry of cosmetic.selectors) {
       const existing = cosmeticSelectorSet.get(entry.selector);
       if (!existing) {
         cosmeticSelectorSet.set(entry.selector, entry);
@@ -243,12 +267,17 @@ async function main() {
         existing.genericOnly = false;
       }
     }
+    for (const [domain, set] of cosmetic.domainSelectors) {
+      let merged = domainCosmeticSelectors.get(domain);
+      if (!merged) domainCosmeticSelectors.set(domain, (merged = new Set()));
+      for (const selector of set) merged.add(selector);
+    }
   }
 
   // 통합된 규칙 집합 전체에 전역적으로 고유한 순차 id를 다시 부여한다
   // (각 소스 필터의 DeclarativeFilterConverter는 id를 1부터 시작하므로,
   // 하나의 manifest 룰셋 등록으로 병합되면 충돌하게 된다).
-  const combinedRules = allDeclarativeRules.map((rule, index) => ({ ...rule, id: index + 1 }));
+  const combinedRules = allDeclarativeRules.map((rule, index) => Object.assign(rule, { id: index + 1 }));
 
   // 최종(재할당된) id를 키로 하는 런타임 rule-conditions 맵을 만든다.
   // sourceRuleText는 allDeclarativeRules와 순서가 나란히 대응되며(재할당 전
@@ -270,10 +299,10 @@ async function main() {
   const totalRuleCount = combinedRules.length;
   const totalRegexRuleCount = combinedRules.filter((r) => Boolean(r.condition.regexFilter)).length;
 
-  if (totalRuleCount > MAX_ENABLED_STATIC_RULES) {
+  if (totalRuleCount > MAX_TOTAL_STATIC_RULES) {
     console.error(
-      `[build-filter-rules] FATAL: ${totalRuleCount} combined network rules exceed Chrome's ` +
-        `${MAX_ENABLED_STATIC_RULES}-enabled-static-rule cap. Build failed.`,
+      `[build-filter-rules] FATAL: ${totalRuleCount} combined network rules exceed the ` +
+        `${MAX_TOTAL_STATIC_RULES} build budget. Build failed.`,
     );
     process.exit(1);
   }
@@ -286,9 +315,24 @@ async function main() {
   }
 
   const rulesetChunks = chunk(combinedRules, RULES_PER_RULESET_FILE);
+
+  if (rulesetChunks.length > MAX_STATIC_RULESETS) {
+    console.error(
+      `[build-filter-rules] FATAL: ${rulesetChunks.length} ruleset files exceed Chrome's ` +
+        `${MAX_STATIC_RULESETS}-static-ruleset cap. Build failed.`,
+    );
+    process.exit(1);
+  }
+
+  // 보장 최소치를 넘지 않는 선까지의 룰셋만 매니페스트에서 켠 채로 배포한다.
+  // 이보다 많이 켠 상태로 설치되면, 전역 풀이 이미 다른 확장 프로그램으로
+  // 차 있을 때 Chrome이 룰셋 로드를 거부해 차단이 통째로 죽는다.
+  const coreRulesetCount = Math.floor(GUARANTEED_STATIC_RULES / RULES_PER_RULESET_FILE);
+  const rulesetRuleCounts = rulesetChunks.map((rules) => rules.length);
+
   await Promise.all(
     rulesetChunks.map((rules, index) =>
-      writeFile(path.join(rulesOutDir, `dnr-ruleset-${index + 1}.json`), `${JSON.stringify(rules, null, 2)}\n`, "utf8"),
+      writeFile(path.join(rulesOutDir, `dnr-ruleset-${index + 1}.json`), `${JSON.stringify(rules)}\n`, "utf8"),
     ),
   );
 
@@ -303,10 +347,48 @@ async function main() {
   );
   stats.cosmeticSelectorsExtracted = cosmeticSelectors.length;
 
+  // 콘텐츠 스크립트가 그대로 <style>에 넣는 완성된 스타일시트. 선택자마다
+  // 규칙을 따로 뽑으면 선언부만 32만 바이트 넘게 중복되고, 전부를 한 규칙으로
+  // 합치면 CSS 파서가 잘못된 선택자 하나 때문에 필터 전체를 버린다. 묶음으로
+  // 나눠 손실을 그 묶음 하나로 제한한다.
+  const CSS_SELECTORS_PER_RULE = 64;
+  const cssRules: string[] = [];
+  for (let i = 0; i < cosmeticSelectors.length; i += CSS_SELECTORS_PER_RULE) {
+    const group = cosmeticSelectors.slice(i, i + CSS_SELECTORS_PER_RULE);
+    cssRules.push(`${group.join(",")}{display:none!important}`);
+  }
+  await writeFile(path.join(rulesOutDir, "cosmetic.css"), `${cssRules.join("\n")}\n`, "utf8");
+
+  // 도메인 특화 선택자. 범용 스타일시트와 달리 콘텐츠 스크립트에 통째로 넣지
+  // 않는다 — 500KB가 넘어 프레임마다 파싱하면 감당이 안 된다. 서비스 워커가
+  // 한 번만 읽어 들고 있다가 호스트명별로 조회해준다.
+  const domainCosmetics: Record<string, string[]> = {};
+  for (const [domain, set] of [...domainCosmeticSelectors].sort(([a], [b]) => a.localeCompare(b))) {
+    domainCosmetics[domain] = [...set].sort();
+  }
   await writeFile(
-    path.join(rulesOutDir, "rule-conditions.json"),
-    `${JSON.stringify(ruleConditions)}\n`,
+    path.join(rulesOutDir, "cosmetic-domains.json"),
+    `${JSON.stringify(domainCosmetics)}\n`,
     "utf8",
+  );
+  stats.cosmeticDomainsExtracted = domainCosmeticSelectors.size;
+
+  // 규칙 ID → 조건/설명 맵. 전량이 9MB에 달해 통째로 올리면 팝업이 열리지
+  // 않으므로 룰셋과 같은 경계로 쪼갠다. 규칙 ID가 순번이므로 조회 측은
+  // ID만으로 어느 조각을 읽어야 하는지 계산할 수 있다.
+  await Promise.all(
+    rulesetChunks.map((rules, index) => {
+      const chunkConditions: Record<number, RuleCondition> = {};
+      for (const rule of rules) {
+        const condition = ruleConditions[rule.id];
+        if (condition) chunkConditions[rule.id] = condition;
+      }
+      return writeFile(
+        path.join(rulesOutDir, `rule-conditions-${index + 1}.json`),
+        `${JSON.stringify(chunkConditions)}\n`,
+        "utf8",
+      );
+    }),
   );
 
   const manifestMeta = {
@@ -314,10 +396,22 @@ async function main() {
     sources: FILTER_SOURCES.map((s) => s.name),
     attribution: "EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed",
     rulesetFileCount: rulesetChunks.length,
+    // 매니페스트에서 기본으로 켤 룰셋 수. 나머지는 서비스 워커가 전역 풀
+    // 가용량을 확인한 뒤 추가로 켠다.
+    coreRulesetCount,
+    // 룰셋별 규칙 수 — 워커가 "이 룰셋을 켤 예산이 남았는지" 계산하는 데 쓴다.
+    rulesetRuleCounts,
+    // 규칙 ID로 rule-conditions 조각 번호를 계산하는 데 쓴다.
+    rulesPerRulesetFile: RULES_PER_RULESET_FILE,
     ...stats,
     totalNetworkRules: totalRuleCount,
+    coreNetworkRules: rulesetRuleCounts.slice(0, coreRulesetCount).reduce((a, b) => a + b, 0),
     totalRegexFilterRules: totalRegexRuleCount,
-    caps: { maxEnabledStaticRules: MAX_ENABLED_STATIC_RULES, maxRegexFilterRules: MAX_REGEX_FILTER_RULES },
+    caps: {
+      guaranteedStaticRules: GUARANTEED_STATIC_RULES,
+      maxRegexFilterRules: MAX_REGEX_FILTER_RULES,
+      maxStaticRulesets: MAX_STATIC_RULESETS,
+    },
   };
   await writeFile(
     path.join(rulesOutDir, "filter-metadata.json"),
@@ -326,9 +420,12 @@ async function main() {
   );
 
   console.log(
-    `[build-filter-rules] Done. Network rules: ${totalRuleCount}/${MAX_ENABLED_STATIC_RULES} ` +
-      `(regex: ${totalRegexRuleCount}/${MAX_REGEX_FILTER_RULES}), split into ${rulesetChunks.length} ruleset file(s). ` +
-      `Cosmetic selectors: ${cosmeticSelectors.length}.`,
+    `[build-filter-rules] Done. Network rules: ${totalRuleCount} in ${rulesetChunks.length} ruleset(s) ` +
+      `— ${coreRulesetCount} enabled by default (guaranteed ${GUARANTEED_STATIC_RULES}), ` +
+      `${rulesetChunks.length - coreRulesetCount} enabled at runtime from the global pool. ` +
+      `Regex: ${totalRegexRuleCount}/${MAX_REGEX_FILTER_RULES}. ` +
+      `Cosmetic selectors: ${cosmeticSelectors.length} generic, ` +
+      `${domainCosmeticSelectors.size} domain-specific entries.`,
   );
 }
 

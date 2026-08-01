@@ -47,12 +47,31 @@ export interface AggregateStats {
   perDomain: Record<string, DomainStats>;
 }
 
+/**
+ * 런타임에 내려받은 코스메틱 필터. 네트워크 규칙은 정적 룰셋이라 확장 프로그램
+ * 업데이트로만 갱신되지만, 코스메틱 선택자는 CSS일 뿐이라 DNR 상한과 무관하게
+ * 런타임에 갱신할 수 있다.
+ */
+export interface FilterUpdateState {
+  /** 내용이 실제로 바뀐 마지막 시각. */
+  updatedAt: number;
+  /** 상류를 확인한 마지막 시각. 변경이 없어도 갱신된다. */
+  checkedAt: number;
+  etag?: string;
+  lastModified?: string;
+  /** 번들된 범용 선택자에 없던 새 선택자. */
+  addedGenericSelectors: string[];
+  /** 도메인 → 선택자. 번들 맵과 병합해서 쓴다. */
+  domainSelectors: Record<string, string[]>;
+}
+
 export interface StorageSchema {
   enabled: boolean;
   domainRules: Record<string, DomainRuleEntry>;
   customRemovedElements: Record<string, CustomRemovedElement[]>;
   observedRules: Record<string, DiscoveredNetworkRule[]>;
   stats: AggregateStats;
+  filterUpdate: FilterUpdateState | null;
 }
 
 const DEFAULTS: StorageSchema = {
@@ -65,6 +84,7 @@ const DEFAULTS: StorageSchema = {
     totalCosmeticRemoved: 0,
     perDomain: {},
   },
+  filterUpdate: null,
 };
 
 const KEYS = Object.keys(DEFAULTS) as (keyof StorageSchema)[];
@@ -77,7 +97,19 @@ async function getAll(): Promise<StorageSchema> {
     customRemovedElements: stored.customRemovedElements ?? DEFAULTS.customRemovedElements,
     observedRules: stored.observedRules ?? DEFAULTS.observedRules,
     stats: stored.stats ?? DEFAULTS.stats,
+    filterUpdate: stored.filterUpdate ?? DEFAULTS.filterUpdate,
   };
+}
+
+// --- 런타임 필터 갱신 ---
+
+export async function getFilterUpdate(): Promise<FilterUpdateState | null> {
+  const { filterUpdate } = await chrome.storage.local.get<Partial<StorageSchema>>("filterUpdate");
+  return filterUpdate ?? DEFAULTS.filterUpdate;
+}
+
+export async function setFilterUpdate(state: FilterUpdateState): Promise<void> {
+  await chrome.storage.local.set({ filterUpdate: state });
 }
 
 export async function getFullState(): Promise<StorageSchema> {
@@ -181,21 +213,6 @@ export async function toggleDisabledRuleId(
       ? [...entry.disabledRuleIds, ruleId]
       : entry.disabledRuleIds.filter((id) => id !== ruleId);
     return { ...entry, disabledRuleIds };
-  });
-}
-
-export async function toggleDisabledSelector(
-  pattern: string,
-  selector: string,
-  disabled: boolean,
-): Promise<Record<string, DomainRuleEntry>> {
-  return updateDomainRule(pattern, (entry) => {
-    const has = entry.disabledSelectors.includes(selector);
-    if (disabled === has) return entry;
-    const disabledSelectors = disabled
-      ? [...entry.disabledSelectors, selector]
-      : entry.disabledSelectors.filter((s) => s !== selector);
-    return { ...entry, disabledSelectors };
   });
 }
 
@@ -303,6 +320,33 @@ export async function getDomainStats(hostname: string): Promise<DomainStats> {
   return stats.perDomain[hostname] ?? { networkBlocked: 0, cosmeticRemoved: 0 };
 }
 
+/**
+ * perDomain은 방문한 도메인마다 늘어나기만 하므로 상한을 둔다. 넘치면 집계가
+ * 가장 적은 도메인부터 버린다 — 합계(total*)는 건드리지 않으므로 누적 총량은
+ * 유지된다.
+ */
+const MAX_TRACKED_DOMAINS = 500;
+
+function prunePerDomain(
+  perDomain: Record<string, DomainStats>,
+  keepHostname: string,
+): Record<string, DomainStats> {
+  const entries = Object.entries(perDomain);
+  if (entries.length <= MAX_TRACKED_DOMAINS) return perDomain;
+  const ranked = entries
+    .filter(([hostname]) => hostname !== keepHostname)
+    .sort(([, a], [, b]) => b.cosmeticRemoved - a.cosmeticRemoved)
+    .slice(0, MAX_TRACKED_DOMAINS - 1);
+  const kept = Object.fromEntries(ranked);
+  const current = perDomain[keepHostname];
+  if (current) kept[keepHostname] = current;
+  return kept;
+}
+
+/**
+ * 읽기-수정-쓰기라 동시에 부르면 갱신이 유실된다. 서비스 워커 한 곳에서만
+ * 직렬화해 호출할 것 — 콘텐츠 스크립트가 직접 부르면 탭마다 경쟁한다.
+ */
 export async function incrementStats(
   hostname: string,
   delta: Partial<DomainStats>,
@@ -316,7 +360,7 @@ export async function incrementStats(
   const next: AggregateStats = {
     totalNetworkBlocked: stats.totalNetworkBlocked + (delta.networkBlocked ?? 0),
     totalCosmeticRemoved: stats.totalCosmeticRemoved + (delta.cosmeticRemoved ?? 0),
-    perDomain: { ...stats.perDomain, [hostname]: nextDomain },
+    perDomain: prunePerDomain({ ...stats.perDomain, [hostname]: nextDomain }, hostname),
   };
   await chrome.storage.local.set({ stats: next });
   return next;

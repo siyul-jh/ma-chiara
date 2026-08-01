@@ -1,30 +1,53 @@
-// 콘텐츠(광고) 제거 콘텐츠 스크립트. document_start 시점에 SW를 거치지
+// 콘텐츠(광고) 숨김 콘텐츠 스크립트. document_start 시점에 SW를 거치지
 // 않고 chrome.storage.local을 직접 읽는다 (SW 콜드 스타트 경쟁 상태 회피).
+//
+// 숨김은 MutationObserver가 아니라 <style> 주입으로 처리한다. CSS 엔진이
+// 매칭을 네이티브로, 변경된 부분에 대해서만 수행하므로 DOM이 끊임없이 바뀌는
+// 페이지에서도 메인 스레드를 점유하지 않는다. 요소는 제거되는 대신
+// display:none으로 숨겨진다.
 
-import cosmeticSelectors from "../rules/cosmetic-selectors.json";
+import cosmeticCss from "../rules/cosmetic.css?raw";
 import {
   getCustomRemovedElements,
   getDomainRules,
   getEnabled,
-  incrementStats,
   onStorageChange,
 } from "../lib/storage";
 import { findMatchingDomainPattern } from "../lib/domain-matcher";
 
-const BASE_SELECTORS: string[] = Array.isArray(cosmeticSelectors)
-  ? (cosmeticSelectors as string[])
-  : [];
+const BASE_STYLE_ID = "__ma-chiara-cosmetic-style__";
+const DOMAIN_STYLE_ID = "__ma-chiara-domain-style__";
+const CUSTOM_STYLE_ID = "__ma-chiara-pre-hide-style__";
 
-// storage 읽기는 비동기라 document_start 시점에 첫 페인트 전 커스텀 선택자를
-// 못 가져올 수 있어 재방문 시 깜빡임이 생긴다. localStorage(동기)에 마지막
-// 목록을 캐시해두고 스크립트 평가 즉시 CSS로 선(先)숨김 처리한다.
-const PRE_HIDE_CACHE_KEY = "__ma-chiara-custom-selectors-cache__";
-const PRE_HIDE_STYLE_ID = "__ma-chiara-pre-hide-style__";
+/** scripts/build-filter-rules.ts의 CSS_SELECTORS_PER_RULE과 맞춰야 한다. */
+const BASE_SELECTORS_PER_RULE = 64;
 
-function readPreHideCache(): string[] {
+// storage 읽기는 비동기라 첫 페인트 전에는 결과를 알 수 없다. 마지막 상태를
+// localStorage(동기)에 캐시해 재방문 시의 깜빡임을 없앤다.
+const CUSTOM_CACHE_KEY = "__ma-chiara-custom-selectors-cache__";
+const DOMAIN_CACHE_KEY = "__ma-chiara-domain-selectors-cache__";
+const ACTIVE_CACHE_KEY = "__ma-chiara-active-cache__";
+
+function readCache(key: string): string | null {
   try {
-    const raw = localStorage.getItem(PRE_HIDE_CACHE_KEY);
-    if (!raw) return [];
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // 용량 초과, 서드파티 스토리지 차단 등 — 최선-노력.
+  }
+}
+
+function readSelectorCache(key: string): string[] {
+  const raw = readCache(key);
+  if (!raw) return [];
+  try {
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : [];
   } catch {
@@ -32,141 +55,160 @@ function readPreHideCache(): string[] {
   }
 }
 
-function writePreHideCache(selectors: string[]): void {
-  try {
-    localStorage.setItem(PRE_HIDE_CACHE_KEY, JSON.stringify(selectors));
-  } catch {
-    // 용량 초과 등 — 최선-노력.
+/**
+ * batchSize를 키우면 선언부 중복이 줄어 스타일시트가 작아지지만, 문법이 잘못된
+ * 선택자 하나가 같은 묶음의 나머지까지 함께 버려지게 만든다.
+ */
+function toCss(selectors: readonly string[], batchSize = 1): string {
+  const rules: string[] = [];
+  for (let i = 0; i < selectors.length; i += batchSize) {
+    rules.push(`${selectors.slice(i, i + batchSize).join(",")}{display:none!important}`);
   }
+  return rules.join("\n");
 }
 
-function applyPreHideStyle(selectors: string[]): void {
-  let styleEl = document.getElementById(PRE_HIDE_STYLE_ID) as HTMLStyleElement | null;
-  if (selectors.length === 0) {
+function setStyle(id: string, cssText: string): void {
+  let styleEl = document.getElementById(id) as HTMLStyleElement | null;
+  if (!cssText) {
     styleEl?.remove();
     return;
   }
   if (!styleEl) {
     styleEl = document.createElement("style");
-    styleEl.id = PRE_HIDE_STYLE_ID;
+    styleEl.id = id;
+    // document_start에는 head가 아직 없을 수 있다.
     (document.head ?? document.documentElement).appendChild(styleEl);
   }
-  styleEl.textContent = selectors.map((selector) => `${selector} { display: none !important; }`).join("\n");
+  if (styleEl.textContent !== cssText) {
+    styleEl.textContent = cssText;
+  }
 }
 
-// 캐시로부터의 동기적 사전 숨김 — 어떤 비동기 스토리지 읽기보다도 먼저
-// 실행되어야 반복 방문 시의 깜빡임을 없앤다.
-applyPreHideStyle(readPreHideCache());
+// 캐시가 없으면 "동작 중"으로 간주한다 — allOff는 명시적으로 켜는 예외다.
+if (readCache(ACTIVE_CACHE_KEY) !== "0") {
+  setStyle(BASE_STYLE_ID, cosmeticCss);
+  setStyle(DOMAIN_STYLE_ID, toCss(readSelectorCache(DOMAIN_CACHE_KEY)));
+  setStyle(CUSTOM_STYLE_ID, toCss(readSelectorCache(CUSTOM_CACHE_KEY)));
+}
 
-let observer: MutationObserver | null = null;
-let appliedCustomSelectors: string[] = [];
+// 하위 프레임은 보고하지 않는다: 이 호스트명은 DNR initiatorDomains("요청을
+// 시작한 페이지")로 쓰이므로 애초에 맞는 값이 아니고, 프레임마다 보내면 광고
+// iframe이 많은 페이지에서 SW를 수십 번 깨운다.
+/**
+ * 서비스 워커로 보내되 실패는 삼킨다. sendMessage는 확장 프로그램 컨텍스트가
+ * 무효화되면 동기적으로 던지고, 워커가 응답하지 않으면 프로미스로 거부한다 —
+ * 동기 try/catch만으로는 후자를 잡지 못해 처리되지 않은 거부로 남는다.
+ */
+function sendToWorker(message: Record<string, unknown>): void {
+  try {
+    void chrome.runtime.sendMessage(message).catch(() => undefined);
+  } catch {
+    // 확장 프로그램이 업데이트·재시작되어 컨텍스트가 사라진 경우 — 최선-노력.
+  }
+}
 
 function reportHostname(): void {
+  if (window.top !== window) return;
+  sendToWorker({ type: "report-hostname", hostname: location.hostname });
+}
+
+/** 개별 선택자를 다시 허용한 도메인에서만 선택자 JSON을 읽어 다시 만든다. */
+async function buildBaseCss(disabledSelectors: readonly string[]): Promise<string> {
+  if (disabledSelectors.length === 0) return cosmeticCss;
+  const disabled = new Set(disabledSelectors);
+  const mod = await import("../rules/cosmetic-selectors.json");
+  const selectors = mod.default as string[];
+  return toCss(selectors.filter((selector) => !disabled.has(selector)), BASE_SELECTORS_PER_RULE);
+}
+
+// 도메인 특화 선택자는 서비스 워커에 물어본다 — 맵이 520KB라 프레임마다 들고
+// 있을 수 없다. 응답을 기다리는 사이 첫 페인트가 지나가므로 받은 목록을
+// 캐시해, 다음 방문에는 스크립트 평가 즉시 적용되게 한다. 최상위 프레임만
+// 갱신하며, 같은 출처의 하위 프레임은 공유된 localStorage 캐시로 함께 적용된다.
+async function applyDomainCosmetics(disabledSelectors: readonly string[]): Promise<void> {
+  if (window.top !== window) return;
+  let selectors: string[];
   try {
-    void chrome.runtime.sendMessage({ type: "report-hostname", hostname: location.hostname });
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: "get-domain-cosmetics",
+      hostname: location.hostname,
+    });
+    if (!Array.isArray(response)) return;
+    selectors = response.filter((s): s is string => typeof s === "string");
   } catch {
-    // SW 재시작 중 등 — 최선-노력.
+    return; // SW 재시작 등 — 캐시본을 그대로 둔다.
+  }
+  const disabled = new Set(disabledSelectors);
+  const effective = disabled.size > 0 ? selectors.filter((s) => !disabled.has(s)) : selectors;
+  writeCache(DOMAIN_CACHE_KEY, JSON.stringify(effective));
+  setStyle(DOMAIN_STYLE_ID, toCss(effective));
+}
+
+function runWhenIdle(task: () => void): void {
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(() => task(), { timeout: 5000 });
+  } else {
+    window.setTimeout(task, 3000);
   }
 }
 
-// querySelectorAll에 콤마로 합친 선택자 목록을 넘길 때 하나라도 문법이
-// 잘못되면 SyntaxError로 전체가 실패하므로, 도메인 진입 시 한 번만 개별
-// 검증 후 합친다. 이 비용을 뮤테이션마다 반복하지 않기 위함.
-function compileSelectorList(selectors: string[]): string {
-  const probe = document.createDocumentFragment();
-  const valid: string[] = [];
-  for (const selector of selectors) {
+// 숨김을 CSS에 맡기면 몇 개를 가렸는지 알 수 없다. 통계는 UI 전반에서 추정치로
+// 표기되므로 유휴 시간 및 DOMContentLoaded 시점에 최상위 프레임에서 안전하게 세어 보고한다.
+let hiddenCountScheduled = false;
+
+function countHiddenElements(): void {
+  if (window.top !== window) return;
+  let hiddenCount = 0;
+  for (const id of [BASE_STYLE_ID, DOMAIN_STYLE_ID, CUSTOM_STYLE_ID]) {
+    const styleEl = document.getElementById(id) as HTMLStyleElement | null;
+    if (!styleEl?.sheet) continue;
     try {
-      probe.querySelector(selector);
-      valid.push(selector);
-    } catch {
-      continue;
-    }
-  }
-  return valid.join(",");
-}
-
-// 선택자 13,000개 이상을 뮤테이션마다 하나씩 querySelectorAll 하던 이전
-// 방식은 DOM이 계속 바뀌는 페이지(YouTube 등)에서 메인 스레드를 막아 영상이
-// 끊기는 원인이었다. 미리 컴파일한 단일 콤마 목록으로 querySelectorAll을
-// 한 번만 호출해 같은 결과를 훨씬 저렴하게 얻는다.
-function removeMatchesInDocument(combinedSelector: string): void {
-  if (!combinedSelector) return;
-  let elements: NodeListOf<Element>;
-  try {
-    elements = document.querySelectorAll(combinedSelector);
-  } catch {
-    return;
-  }
-  let removedCount = 0;
-  for (const element of elements) {
-    if (element.isConnected) {
-      element.remove();
-      removedCount++;
-    }
-  }
-  if (removedCount > 0) {
-    void incrementStats(location.hostname, { cosmeticRemoved: removedCount });
-  }
-}
-
-// 커스텀(요소 선택기) 선택자는 :nth-child 기반 위치 선택자라 문서 전체를
-// 반복 재매칭하면 위험하다: 요소 제거 자체가 뮤테이션이라 옵저버가 재실행될
-// 때 비워진 nth-child 위치로 밀려든 형제가 같은 선택자와 매칭되어 연쇄
-// 삭제된다. addedNodes(새로 삽입된 노드)에서만 재매칭해 이를 피한다.
-function removeMatchesInAddedNodes(selectors: string[], addedNodes: readonly Node[]): void {
-  if (selectors.length === 0 || addedNodes.length === 0) return;
-  let removedCount = 0;
-  for (const node of addedNodes) {
-    if (!(node instanceof Element) || !node.isConnected) continue;
-    for (const selector of selectors) {
-      let matches: Element[];
-      try {
-        matches = node.matches(selector) ? [node] : [...node.querySelectorAll(selector)];
-      } catch {
-        continue;
-      }
-      for (const element of matches) {
-        if (element.isConnected) {
-          element.remove();
-          removedCount++;
+      for (const rule of styleEl.sheet.cssRules) {
+        const { selectorText } = rule as CSSStyleRule;
+        if (!selectorText) continue;
+        try {
+          hiddenCount += document.querySelectorAll(selectorText).length;
+        } catch {
+          // 단일 선택자 파싱 오류는 무시하고 나머지 규칙은 계속 계산한다.
         }
       }
+    } catch {
+      // CSSStyleSheet 접근 오류 방지
     }
   }
-  if (removedCount > 0) {
-    void incrementStats(location.hostname, { cosmeticRemoved: removedCount });
+
+  if (hiddenCount > 0) {
+    sendToWorker({
+      type: "report-cosmetic-count",
+      hostname: location.hostname,
+      count: hiddenCount,
+    });
   }
 }
 
-function startObserving(baseSelectors: string[], customSelectors: string[]): void {
-  stopObserving();
-  appliedCustomSelectors = customSelectors;
-  const combinedBaseSelector = compileSelectorList(baseSelectors);
-  const combinedCustomSelector = compileSelectorList(customSelectors);
-  writePreHideCache(customSelectors);
-  applyPreHideStyle(customSelectors);
-  removeMatchesInDocument(combinedBaseSelector);
-  removeMatchesInDocument(combinedCustomSelector);
-  observer = new MutationObserver((mutations) => {
-    removeMatchesInDocument(combinedBaseSelector);
-    const addedNodes = mutations.flatMap((mutation) => Array.from(mutation.addedNodes));
-    removeMatchesInAddedNodes(appliedCustomSelectors, addedNodes);
+function scheduleHiddenCount(): void {
+  if (hiddenCountScheduled || window.top !== window) return;
+  hiddenCountScheduled = true;
+
+  const runCount = () => {
+    countHiddenElements();
+  };
+
+  runWhenIdle(() => {
+    runCount();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", runCount, { once: true });
+    }
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
 }
 
-function stopObserving(): void {
-  observer?.disconnect();
-  observer = null;
-}
-
-interface ResolvedSelectors {
-  baseSelectors: string[];
+interface ResolvedStyles {
+  baseCss: string;
   customSelectors: string[];
+  disabledSelectors: readonly string[];
 }
 
-async function resolveSelectorsForDomain(hostname: string): Promise<ResolvedSelectors | null> {
+async function resolveStylesForDomain(hostname: string): Promise<ResolvedStyles | null> {
   const [enabled, domainRules] = await Promise.all([getEnabled(), getDomainRules()]);
 
   if (!enabled) return null;
@@ -176,43 +218,56 @@ async function resolveSelectorsForDomain(hostname: string): Promise<ResolvedSele
 
   if (entry?.allOff) return null;
 
-  const disabled = entry ? new Set(entry.disabledSelectors) : null;
-  const baseSelectors = disabled
-    ? BASE_SELECTORS.filter((selector) => !disabled.has(selector))
-    : BASE_SELECTORS;
-  const customElements = await getCustomRemovedElements(hostname);
-  return { baseSelectors, customSelectors: customElements.map((el) => el.selector) };
+  const disabledSelectors = entry?.disabledSelectors ?? [];
+  const [baseCss, customElements] = await Promise.all([
+    buildBaseCss(disabledSelectors),
+    getCustomRemovedElements(hostname),
+  ]);
+  return { baseCss, customSelectors: customElements.map((el) => el.selector), disabledSelectors };
 }
 
 async function apply(): Promise<void> {
   reportHostname();
 
-  const hostname = location.hostname;
-  const resolved = await resolveSelectorsForDomain(hostname);
+  const resolved = await resolveStylesForDomain(location.hostname);
 
   if (resolved === null) {
-    stopObserving();
-    writePreHideCache([]);
-    applyPreHideStyle([]);
+    writeCache(ACTIVE_CACHE_KEY, "0");
+    writeCache(CUSTOM_CACHE_KEY, "[]");
+    writeCache(DOMAIN_CACHE_KEY, "[]");
+    setStyle(BASE_STYLE_ID, "");
+    setStyle(DOMAIN_STYLE_ID, "");
+    setStyle(CUSTOM_STYLE_ID, "");
     return;
   }
 
-  startObserving(resolved.baseSelectors, resolved.customSelectors);
+  writeCache(ACTIVE_CACHE_KEY, "1");
+  writeCache(CUSTOM_CACHE_KEY, JSON.stringify(resolved.customSelectors));
+  setStyle(BASE_STYLE_ID, resolved.baseCss);
+  setStyle(CUSTOM_STYLE_ID, toCss(resolved.customSelectors));
+  void applyDomainCosmetics(resolved.disabledSelectors).catch((error: unknown) => {
+    console.error("[마! 치아라] 도메인별 광고 숨김 규칙을 적용하지 못했습니다.", error);
+  });
+  scheduleHiddenCount();
 }
 
-void apply();
+function runApply(): void {
+  void apply().catch((error: unknown) => {
+    console.error("[마! 치아라] 광고 숨김 스타일을 적용하지 못했습니다.", error);
+  });
+}
+
+runApply();
 
 onStorageChange((changes) => {
   if (changes.enabled || changes.domainRules || changes.customRemovedElements) {
-    void apply();
+    runApply();
   }
 });
 
 // document_start 로직이 다시 실행되지 않는 bfcache 복원 시 다시 검사한다.
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) {
-    void apply();
+    runApply();
   }
 });
-
-export {};
