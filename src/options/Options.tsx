@@ -407,6 +407,15 @@ function ObservedRulesSubsection({
   );
 }
 
+interface CustomElementRow {
+  hostname: string;
+  selector: string;
+  createdAt: number;
+}
+
+// customRemovedElements는 실제로 골랐던 리터럴 호스트명별로 저장되므로,
+// entry.knownHostnames 전체를 하나의 목록으로 합쳐서 보여준다(카드 제목이
+// 이미 현재 패턴을 보여준다). 출처가 둘 이상일 때만 행마다 호스트명을 덧붙인다.
 function CustomElementsSubsection({
   hostnames,
   customElements,
@@ -418,50 +427,50 @@ function CustomElementsSubsection({
   onRemove: (hostname: string, selector: string) => Promise<void>;
   muted: boolean;
 }) {
-  const relevantHostnames = useMemo(
-    () => hostnames.filter((hostname) => (customElements[hostname]?.length ?? 0) > 0).sort(),
-    [hostnames, customElements],
-  );
+  const rows = useMemo(() => {
+    const flattened: CustomElementRow[] = [];
+    for (const hostname of hostnames) {
+      for (const el of customElements[hostname] ?? []) {
+        flattened.push({ hostname, selector: el.selector, createdAt: el.createdAt });
+      }
+    }
+    return flattened.sort((a, b) => b.createdAt - a.createdAt);
+  }, [hostnames, customElements]);
+
+  const showOrigin = new Set(rows.map((row) => row.hostname)).size > 1;
 
   return (
     <div style={{ opacity: muted ? 0.5 : 1 }}>
       <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6, color: COLORS.ink }}>수동 제거 항목</div>
-      {relevantHostnames.length === 0 ? (
+      {rows.length === 0 ? (
         <p style={{ color: COLORS.sub, fontSize: 12, margin: 0 }}>요소 선택기로 제거한 항목이 없습니다.</p>
       ) : (
-        relevantHostnames.map((hostname) => {
-          const elements = customElements[hostname] ?? [];
-          return (
-            <div key={hostname} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11.5, marginBottom: 4, color: COLORS.sub, fontFamily: "ui-monospace, monospace" }}>
-                {hostname}
-              </div>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <tbody>
-                  {elements.map((el, i) => (
-                    <tr key={el.selector} style={{ background: i % 2 === 1 ? COLORS.zebra : "transparent" }}>
-                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, fontFamily: "ui-monospace, monospace" }}>
-                        {el.selector}
-                      </td>
-                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, color: COLORS.sub, width: 140 }}>
-                        {new Date(el.createdAt).toLocaleDateString()}
-                      </td>
-                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, textAlign: "right", width: 70 }}>
-                        <button
-                          type="button"
-                          onClick={() => runAction(onRemove(hostname, el.selector))}
-                          style={{ border: "none", background: "transparent", color: COLORS.danger, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-                        >
-                          삭제
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        })
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={`${row.hostname}::${row.selector}`} style={{ background: i % 2 === 1 ? COLORS.zebra : "transparent" }}>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, fontFamily: "ui-monospace, monospace" }}>
+                  {row.selector}
+                  {showOrigin && (
+                    <div style={{ color: COLORS.sub, fontSize: 10.5, marginTop: 2, fontWeight: 400 }}>{row.hostname}</div>
+                  )}
+                </td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, color: COLORS.sub, width: 140 }}>
+                  {new Date(row.createdAt).toLocaleDateString()}
+                </td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLORS.borderSoft}`, textAlign: "right", width: 70 }}>
+                  <button
+                    type="button"
+                    onClick={() => runAction(onRemove(row.hostname, row.selector))}
+                    style={{ border: "none", background: "transparent", color: COLORS.danger, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+                  >
+                    삭제
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );
