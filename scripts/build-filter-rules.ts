@@ -1,10 +1,15 @@
 /**
  * 빌드 타임 필터 파이프라인: EasyList + EasyPrivacy를 다음으로 변환한다:
  *   - src/rules/dnr-ruleset-*.json — 정적 declarativeNetRequest 룰셋
- *   - src/rules/cosmetic-selectors.json — 콘텐츠 스크립트의 DOM 숨김용 CSS 선택자
- *   - src/rules/rule-conditions.json — 네트워크 규칙 ID별 condition + description
- *     맵. 런타임에 도메인별 "allow" 예외를 만들고, 팝업에서 발견된 차단 규칙에
- *     원본 EasyList 필터 라인으로 레이블을 붙이는 데 쓰인다.
+ *   - src/rules/cosmetic-selectors.json — 콘텐츠 스크립트/옵션 페이지가 import하는
+ *     DOM 숨김용 CSS 선택자
+ *   - public/rules/cosmetic-domains.json, rule-conditions-*.json,
+ *     cosmetic-selectors.json — 서비스 워커가 fetch(chrome.runtime.getURL(...))로
+ *     읽는 사본. 서비스 워커에서는 동적 import()가 스펙상 금지라
+ *     (https://github.com/w3c/ServiceWorker/issues/1356) src/rules처럼 JS
+ *     import 대상으로 둘 수 없다. rule-conditions는 네트워크 규칙 ID별
+ *     condition + description 맵으로, 도메인별 "allow" 예외와 팝업의 차단
+ *     규칙 레이블에 쓰인다.
  *
  * 원본 목록은 .cache/filter-sources/에 한 번 다운로드되어(gitignore 처리,
  * 필요할 때 다시 가져옴 — 용량이 크고 easylist.to가 표준 업스트림이라 커밋하지
@@ -72,6 +77,10 @@ const RULES_PER_RULESET_FILE = 30_000;
 const rootDir = path.resolve(import.meta.dirname, "..");
 const sourcesDir = path.join(rootDir, ".cache", "filter-sources");
 const rulesOutDir = path.join(rootDir, "src", "rules");
+// 서비스 워커가 fetch(chrome.runtime.getURL(...))로 읽는 파일 출력 위치.
+// 동적 import()를 못 쓰므로(위 헤더 주석 참고) Vite가 해시 없이 그대로
+// 복사하는 public/ 아래 원본 파일로 둬야 한다.
+const publicRulesOutDir = path.join(rootDir, "public", "rules");
 
 // 우선순위 배분이 중요하다: EasyList(일반 광고 차단)가 주된 사용자 체감
 // 신호이므로 3만 개 규칙 예산 중 더 큰 몫을 받고, EasyPrivacy(트래커 차단)가
@@ -187,6 +196,7 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 async function main() {
   await mkdir(rulesOutDir, { recursive: true });
+  await mkdir(publicRulesOutDir, { recursive: true });
 
   setConfiguration({
     engine: "extension",
@@ -340,11 +350,13 @@ async function main() {
     .filter((entry) => entry.genericOnly)
     .map((entry) => entry.selector)
     .sort();
-  await writeFile(
-    path.join(rulesOutDir, "cosmetic-selectors.json"),
-    `${JSON.stringify(cosmeticSelectors, null, 2)}\n`,
-    "utf8",
-  );
+  const cosmeticSelectorsJson = `${JSON.stringify(cosmeticSelectors, null, 2)}\n`;
+  // options/콘텐츠 스크립트는 src/rules에서 import하고, 서비스 워커(filter-update.ts)는
+  // public/rules 사본을 fetch()로 읽는다.
+  await Promise.all([
+    writeFile(path.join(rulesOutDir, "cosmetic-selectors.json"), cosmeticSelectorsJson, "utf8"),
+    writeFile(path.join(publicRulesOutDir, "cosmetic-selectors.json"), cosmeticSelectorsJson, "utf8"),
+  ]);
   stats.cosmeticSelectorsExtracted = cosmeticSelectors.length;
 
   // 콘텐츠 스크립트가 그대로 <style>에 넣는 완성된 스타일시트. 선택자마다
@@ -361,13 +373,13 @@ async function main() {
 
   // 도메인 특화 선택자. 범용 스타일시트와 달리 콘텐츠 스크립트에 통째로 넣지
   // 않는다 — 500KB가 넘어 프레임마다 파싱하면 감당이 안 된다. 서비스 워커가
-  // 한 번만 읽어 들고 있다가 호스트명별로 조회해준다.
+  // 한 번만 읽어 들고 있다가 호스트명별로 조회해준다(public/rules에서 fetch).
   const domainCosmetics: Record<string, string[]> = {};
   for (const [domain, set] of [...domainCosmeticSelectors].sort(([a], [b]) => a.localeCompare(b))) {
     domainCosmetics[domain] = [...set].sort();
   }
   await writeFile(
-    path.join(rulesOutDir, "cosmetic-domains.json"),
+    path.join(publicRulesOutDir, "cosmetic-domains.json"),
     `${JSON.stringify(domainCosmetics)}\n`,
     "utf8",
   );
@@ -375,7 +387,7 @@ async function main() {
 
   // 규칙 ID → 조건/설명 맵. 전량이 9MB에 달해 통째로 올리면 팝업이 열리지
   // 않으므로 룰셋과 같은 경계로 쪼갠다. 규칙 ID가 순번이므로 조회 측은
-  // ID만으로 어느 조각을 읽어야 하는지 계산할 수 있다.
+  // ID만으로 어느 조각을 읽어야 하는지 계산할 수 있다(public/rules에서 fetch).
   await Promise.all(
     rulesetChunks.map((rules, index) => {
       const chunkConditions: Record<number, RuleCondition> = {};
@@ -384,7 +396,7 @@ async function main() {
         if (condition) chunkConditions[rule.id] = condition;
       }
       return writeFile(
-        path.join(rulesOutDir, `rule-conditions-${index + 1}.json`),
+        path.join(publicRulesOutDir, `rule-conditions-${index + 1}.json`),
         `${JSON.stringify(chunkConditions)}\n`,
         "utf8",
       );

@@ -29,7 +29,17 @@ import { runFilterUpdate } from "./filter-update";
 import { matchesDomainPattern } from "../lib/domain-matcher";
 import { collectDomainSelectors } from "../lib/cosmetic-domain-lookup";
 import { sendToggleElementPicker } from "../lib/element-picker-injector";
+import { fetchBundledJson } from "../lib/fetch-bundled-json";
 import filterMetadata from "../rules/filter-metadata.json";
+
+// 방어적 안전장치: 서비스 워커에는 window가 없다. Vite의 동적 import()
+// 래퍼(__vitePreload)는 로드 실패 시 window.dispatchEvent(...)를 호출하는데,
+// 다른 의존성이 동적 import()를 들여오면 이 경로에서 "window is not
+// defined"로 워커가 죽어 원래 에러를 가린다. self가 이미 dispatchEvent를
+// 구현하므로 별칭만 달아 무해하게 만든다.
+if (typeof window === "undefined") {
+  (globalThis as { window?: typeof globalThis }).window = self;
+}
 
 interface RuleCondition {
   regexFilter?: string;
@@ -45,8 +55,8 @@ const ruleConditionChunks = new Map<number, Promise<Record<string, RuleCondition
 function loadRuleConditionChunk(chunkIndex: number): Promise<Record<string, RuleCondition>> {
   let cached = ruleConditionChunks.get(chunkIndex);
   if (!cached) {
-    cached = import(`../rules/rule-conditions-${chunkIndex + 1}.json`).then(
-      (mod: { default: Record<string, RuleCondition> }) => mod.default,
+    cached = fetchBundledJson<Record<string, RuleCondition>>(
+      `rules/rule-conditions-${chunkIndex + 1}.json`,
     );
     ruleConditionChunks.set(chunkIndex, cached);
   }
@@ -88,9 +98,7 @@ async function getRuleConditions(ruleIds: readonly number[]): Promise<Map<number
 let domainCosmeticsPromise: Promise<Record<string, string[]>> | undefined;
 function loadDomainCosmetics(): Promise<Record<string, string[]>> {
   if (!domainCosmeticsPromise) {
-    domainCosmeticsPromise = import("../rules/cosmetic-domains.json").then(
-      (mod) => mod.default as Record<string, string[]>,
-    );
+    domainCosmeticsPromise = fetchBundledJson<Record<string, string[]>>("rules/cosmetic-domains.json");
   }
   return domainCosmeticsPromise;
 }
@@ -372,8 +380,12 @@ chrome.runtime.onMessage.addListener(
     if (message?.type === "update-filters") {
       // 설정 페이지의 수동 갱신. 조건부 요청을 건너뛰고 강제로 다시 받는다.
       void runFilterUpdate({ force: true }).then(
-        (outcome) => sendResponse(outcome),
-        () => sendResponse("failed"),
+        (result) => sendResponse(result),
+        (error: unknown) =>
+          sendResponse({
+            outcome: "failed",
+            reason: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다.",
+          }),
       );
       return true;
     }

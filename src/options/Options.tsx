@@ -230,16 +230,26 @@ function FilterUpdateStatus() {
     setBusy(true);
     setMessage(undefined);
     try {
-      const outcome: unknown = await chrome.runtime.sendMessage({ type: "update-filters" });
+      const result: unknown = await chrome.runtime.sendMessage({ type: "update-filters" });
+      const outcome =
+        typeof result === "object" && result !== null && "outcome" in result
+          ? (result as { outcome?: unknown }).outcome
+          : result; // 이전 버전 워커(문자열만 응답)와의 하위 호환.
+      const reason =
+        typeof result === "object" && result !== null && "reason" in result
+          ? (result as { reason?: unknown }).reason
+          : undefined;
       setMessage(
         outcome === "updated"
           ? "필터 목록을 갱신했습니다."
           : outcome === "unchanged"
             ? "이미 최신 상태입니다."
-            : "갱신에 실패했습니다. 네트워크 상태를 확인해 주세요.",
+            : typeof reason === "string" && reason.length > 0
+              ? reason
+              : "갱신에 실패했습니다. 네트워크 상태를 확인해 주세요.",
       );
     } catch {
-      setMessage("갱신에 실패했습니다.");
+      setMessage("갱신에 실패했습니다. 확장 프로그램을 새로고침한 뒤 다시 시도해 주세요.");
     } finally {
       setBusy(false);
     }
