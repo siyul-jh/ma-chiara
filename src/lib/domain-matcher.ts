@@ -35,3 +35,23 @@ export function isValidDomainPattern(pattern: string): boolean {
     return false;
   }
 }
+
+/**
+ * 정확한 호스트명을 와일드카드 패턴 초안으로 바꿔 제안한다. 숫자 구간을
+ * "*"로 치환하고, `wildcardSuffix`를 켜면 마지막 라벨(TLD)까지 바꾼다.
+ * 최종 값은 사용자가 확인·수정 후 확정한다.
+ */
+export function suggestWildcardPattern(
+  pattern: string,
+  options?: { wildcardSuffix?: boolean },
+): string {
+  let result = pattern.replace(/\d+/g, "*");
+  if (options?.wildcardSuffix) {
+    const labels = result.split(".");
+    if (labels.length >= 2) {
+      labels[labels.length - 1] = "*";
+      result = labels.join(".");
+    }
+  }
+  return result;
+}

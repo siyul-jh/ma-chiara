@@ -4,6 +4,7 @@ import {
   isValidDomainPattern,
   matchesAnyDomainPattern,
   matchesDomainPattern,
+  suggestWildcardPattern,
 } from "./domain-matcher";
 
 describe("matchesDomainPattern", () => {
@@ -70,5 +71,28 @@ describe("isValidDomainPattern", () => {
   it("정규식이라면 깨질 입력도 글롭으로는 허용한다", () => {
     expect(isValidDomainPattern("a(b.com")).toBe(true);
     expect(isValidDomainPattern("[.com")).toBe(true);
+  });
+});
+
+describe("suggestWildcardPattern", () => {
+  it("숫자 구간을 *로 치환한다", () => {
+    expect(suggestWildcardPattern("naver43.com")).toBe("naver*.com");
+  });
+
+  it("숫자 구간이 여러 곳이면 전부 치환한다", () => {
+    expect(suggestWildcardPattern("www2.naver43.com")).toBe("www*.naver*.com");
+  });
+
+  it("숫자가 없으면 그대로 돌려준다", () => {
+    expect(suggestWildcardPattern("naver.com")).toBe("naver.com");
+  });
+
+  it("wildcardSuffix를 켜면 마지막 라벨(TLD)도 *로 바꾼다", () => {
+    expect(suggestWildcardPattern("naver43.com", { wildcardSuffix: true })).toBe("naver*.*");
+    expect(suggestWildcardPattern("naver.com", { wildcardSuffix: true })).toBe("naver.*");
+  });
+
+  it("라벨이 하나뿐이면 wildcardSuffix를 무시한다", () => {
+    expect(suggestWildcardPattern("localhost", { wildcardSuffix: true })).toBe("localhost");
   });
 });

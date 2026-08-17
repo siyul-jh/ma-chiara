@@ -174,6 +174,36 @@ export async function upsertDomainRule(pattern: string): Promise<Record<string, 
   return next;
 }
 
+/**
+ * 등록된 패턴을 다른 패턴(보통 정확한 호스트명 → 와일드카드)으로 바꾼다.
+ * knownHostnames는 옛 패턴 문자열을 포함해 이어받는다 — DNR
+ * initiatorDomains는 와일드카드를 못 받으므로 실제 호스트명이 남아 있어야
+ * 한다. 대상 패턴이 이미 있으면 두 항목을 병합한다.
+ */
+export async function renameDomainRule(
+  oldPattern: string,
+  newPattern: string,
+): Promise<Record<string, DomainRuleEntry>> {
+  const domainRules = await getDomainRules();
+  const entry = domainRules[oldPattern];
+  if (!entry || oldPattern === newPattern) return domainRules;
+
+  const target = domainRules[newPattern];
+  const merged: DomainRuleEntry = {
+    pattern: newPattern,
+    allOff: entry.allOff || (target?.allOff ?? false),
+    disabledRuleIds: [...new Set([...entry.disabledRuleIds, ...(target?.disabledRuleIds ?? [])])],
+    disabledSelectors: [...new Set([...entry.disabledSelectors, ...(target?.disabledSelectors ?? [])])],
+    knownHostnames: [...new Set([...entry.knownHostnames, oldPattern, ...(target?.knownHostnames ?? [])])],
+  };
+
+  const next = { ...domainRules };
+  delete next[oldPattern];
+  next[newPattern] = merged;
+  await chrome.storage.local.set({ domainRules: next });
+  return next;
+}
+
 export async function removeDomainRule(pattern: string): Promise<Record<string, DomainRuleEntry>> {
   const domainRules = await getDomainRules();
   if (!domainRules[pattern]) return domainRules;

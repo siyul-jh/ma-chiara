@@ -11,6 +11,7 @@ import {
   onStorageChange,
   removeCustomRemovedElement,
   removeDomainRule,
+  renameDomainRule,
   setDomainRuleAllOff,
   setEnabled,
   toggleDisabledRuleId,
@@ -21,7 +22,7 @@ import {
   type DomainRuleEntry,
   type FilterUpdateState,
 } from "../lib/storage";
-import { isValidDomainPattern, matchesDomainPattern } from "../lib/domain-matcher";
+import { isValidDomainPattern, matchesDomainPattern, suggestWildcardPattern } from "../lib/domain-matcher";
 import filterMetadata from "../rules/filter-metadata.json";
 import cosmeticSelectors from "../rules/cosmetic-selectors.json";
 import packageJson from "../../package.json";
@@ -79,9 +80,9 @@ function SectionHeading({ title, description }: { title: string; description: st
   );
 }
 
-// 기본 tone이 danger인 이유: 기존 스위치들은 모두 "켜면 차단이 풀린다"는
-// 의미라 켜진 상태가 경고색이어야 한다. 반대로 전역 사용 스위치는 켜진
-// 상태가 정상이므로 active를 쓴다.
+// 기본 tone은 danger — "차단 해제"처럼 켜짐이 개별 예외를 뜻하는 스위치용.
+// "사용 중" 자체를 뜻하는 스위치(전역 사용, 도메인별 사용)는 켜짐=보호
+// 작동 중(기본값)이 정상이므로 active를 쓴다.
 function ToggleSwitch({
   checked,
   onChange,
@@ -474,6 +475,7 @@ function DomainRuleCard({
   onDelete,
   onToggleRuleId,
   onRemoveCustomElement,
+  onConvertToWildcard,
 }: {
   entry: DomainRuleEntry;
   observedRules: Record<string, DiscoveredNetworkRule[]>;
@@ -482,8 +484,43 @@ function DomainRuleCard({
   onDelete: (pattern: string) => Promise<void>;
   onToggleRuleId: (pattern: string, ruleId: number, disabled: boolean) => Promise<void>;
   onRemoveCustomElement: (hostname: string, selector: string) => Promise<void>;
+  onConvertToWildcard: (oldPattern: string, newPattern: string) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [editingPattern, setEditingPattern] = useState(false);
+  const [draftPattern, setDraftPattern] = useState(entry.pattern);
+  const [patternError, setPatternError] = useState<string | undefined>(undefined);
+
+  const isWildcard = entry.pattern.includes("*");
+
+  const startEditingPattern = useCallback(() => {
+    setDraftPattern(suggestWildcardPattern(entry.pattern));
+    setPatternError(undefined);
+    setEditingPattern(true);
+  }, [entry.pattern]);
+
+  const cancelEditingPattern = useCallback(() => {
+    setEditingPattern(false);
+    setPatternError(undefined);
+  }, []);
+
+  const applySuffixWildcard = useCallback(() => {
+    setDraftPattern((current) => suggestWildcardPattern(current, { wildcardSuffix: true }));
+  }, []);
+
+  const confirmEditingPattern = useCallback(async () => {
+    const next = draftPattern.trim();
+    if (!isValidDomainPattern(next)) {
+      setPatternError("올바른 도메인 패턴을 입력하세요. 예: naver*.com");
+      return;
+    }
+    if (next === entry.pattern) {
+      setEditingPattern(false);
+      return;
+    }
+    await onConvertToWildcard(entry.pattern, next);
+    setEditingPattern(false);
+  }, [draftPattern, entry.pattern, onConvertToWildcard]);
 
   const mergedObservedRules = useMemo(() => {
     const byId = new Map<number, DiscoveredNetworkRule>();
@@ -510,35 +547,147 @@ function DomainRuleCard({
           background: entry.allOff ? COLORS.dangerSoft : COLORS.zebra,
         }}
       >
-        <div
-          style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, cursor: "pointer" }}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          <span style={{ fontSize: 11, color: COLORS.sub, flexShrink: 0 }}>{expanded ? "▾" : "▸"}</span>
-          <span
-            style={{
-              fontFamily: "ui-monospace, monospace",
-              fontSize: 13,
-              fontWeight: 700,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {entry.pattern}
-          </span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
-          <ToggleSwitch checked={entry.allOff} onChange={(checked) => runAction(onSetAllOff(entry.pattern, checked))} label="전체 끄기" />
-          <button
-            type="button"
-            onClick={() => runAction(onDelete(entry.pattern))}
-            style={{ border: "none", background: "transparent", color: COLORS.danger, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-          >
-            삭제
-          </button>
-        </div>
+        {editingPattern ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+            <input
+              type="text"
+              value={draftPattern}
+              onChange={(e) => setDraftPattern(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") runAction(confirmEditingPattern());
+                if (e.key === "Escape") cancelEditingPattern();
+              }}
+              autoFocus
+              style={{
+                flex: 1,
+                minWidth: 0,
+                padding: "5px 8px",
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 6,
+                fontSize: 12.5,
+                fontFamily: "ui-monospace, monospace",
+                background: "#fff",
+                color: COLORS.ink,
+              }}
+            />
+            <button
+              type="button"
+              onClick={applySuffixWildcard}
+              title="최상위 도메인(.com/.net 등)까지 와일드카드로 바꿉니다"
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                background: "transparent",
+                color: COLORS.ink,
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 600,
+                padding: "5px 8px",
+                borderRadius: 6,
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+              }}
+            >
+              .com/.net도
+            </button>
+            <button
+              type="button"
+              onClick={() => runAction(confirmEditingPattern())}
+              style={{
+                border: `1px solid ${COLORS.ink}`,
+                background: COLORS.ink,
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 11.5,
+                fontWeight: 600,
+                padding: "5px 10px",
+                borderRadius: 6,
+                flexShrink: 0,
+              }}
+            >
+              저장
+            </button>
+            <button
+              type="button"
+              onClick={cancelEditingPattern}
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                background: "transparent",
+                color: COLORS.sub,
+                cursor: "pointer",
+                fontSize: 11.5,
+                fontWeight: 600,
+                padding: "5px 10px",
+                borderRadius: 6,
+                flexShrink: 0,
+              }}
+            >
+              취소
+            </button>
+          </div>
+        ) : (
+          <>
+            <div
+              style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, cursor: "pointer" }}
+              onClick={() => setExpanded((v) => !v)}
+            >
+              <span style={{ fontSize: 11, color: COLORS.sub, flexShrink: 0 }}>{expanded ? "▾" : "▸"}</span>
+              <span
+                style={{
+                  fontFamily: "ui-monospace, monospace",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {entry.pattern}
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
+              {!isWildcard && (
+                <button
+                  type="button"
+                  onClick={startEditingPattern}
+                  title="같은 사이트가 번호나 접미사만 바꿔 옮겨 다니는 미러 도메인(예: naver43.com → naver46.com)에도 이 규칙과 수동 제거 항목이 자동 적용되도록 와일드카드 패턴으로 바꿉니다."
+                  style={{
+                    border: `1px solid ${COLORS.border}`,
+                    background: "transparent",
+                    color: COLORS.ink,
+                    cursor: "pointer",
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    padding: "4px 9px",
+                    borderRadius: 6,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  와일드카드로 변경
+                </button>
+              )}
+              <ToggleSwitch
+                checked={!entry.allOff}
+                onChange={(checked) => runAction(onSetAllOff(entry.pattern, !checked))}
+                label="이 도메인에서 사용"
+                tone="active"
+              />
+              <button
+                type="button"
+                onClick={() => runAction(onDelete(entry.pattern))}
+                style={{ border: "none", background: "transparent", color: COLORS.danger, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                삭제
+              </button>
+            </div>
+          </>
+        )}
       </div>
+
+      {editingPattern && patternError && (
+        <div style={{ padding: "0 14px 10px", fontSize: 11.5, color: COLORS.danger, background: COLORS.zebra }}>
+          {patternError}
+        </div>
+      )}
 
       {expanded && (
         <div style={{ padding: "14px", background: COLORS.card }}>
@@ -678,7 +827,7 @@ export function Options() {
                   </h2>
                   <p style={{ color: COLORS.sub, fontSize: 12.5, margin: 0, lineHeight: 1.6, maxWidth: 460 }}>
                     끄면 모든 사이트에서 차단·제거와 스크롤 잠금 해제가 중단됩니다. 특정 사이트에서만 끄려면
-                    아래 도메인 관리의 &ldquo;전체 끄기&rdquo;를 사용하세요.
+                    아래 도메인 관리에서 그 도메인의 &ldquo;이 도메인에서 사용&rdquo; 스위치를 꺼 주세요.
                   </p>
                 </div>
                 <div style={{ flexShrink: 0, paddingTop: 2 }}>
@@ -692,7 +841,7 @@ export function Options() {
             <Card>
               <SectionHeading
                 title="도메인 관리"
-                description="도메인 패턴(와일드카드)별로 차단 여부를 관리합니다. '전체 끄기'는 해당 도메인에서 확장 프로그램이 설치되지 않은 것처럼 모든 차단·제거를 비활성화합니다. 개별 항목은 실제로 차단/제거된 것 중에서만 선택적으로 다시 허용할 수 있습니다."
+                description="도메인 패턴(와일드카드)별로 차단 여부를 관리합니다. '이 도메인에서 사용'을 끄면 해당 도메인에서 확장 프로그램이 설치되지 않은 것처럼 모든 차단·제거를 비활성화합니다(기본값은 켜짐입니다). 개별 항목은 실제로 차단/제거된 것 중에서만 선택적으로 다시 허용할 수 있습니다."
               />
 
               <AddPatternInput onAdd={async (pattern) => setDomainRulesState(await upsertDomainRule(pattern))} />
@@ -727,6 +876,9 @@ export function Options() {
                       onRemoveCustomElement={async (hostname, selector) => {
                         const next = await removeCustomRemovedElement(hostname, selector);
                         setCustomElements((prev) => ({ ...prev, [hostname]: next }));
+                      }}
+                      onConvertToWildcard={async (oldPattern, newPattern) => {
+                        setDomainRulesState(await renameDomainRule(oldPattern, newPattern));
                       }}
                     />
                   ))}
