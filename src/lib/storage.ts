@@ -233,9 +233,25 @@ export async function addKnownHostname(
 
 // --- 수동 제거 요소 (요소 선택기) ---
 
-export async function getCustomRemovedElements(hostname: string): Promise<CustomRemovedElement[]> {
+/**
+ * 여러 호스트명에 걸쳐 수동 제거 선택자를 모아 중복을 제거해 돌려준다.
+ * 미러 도메인이 같은 와일드카드 패턴의 knownHostnames로 묶여 있으면, 한
+ * 미러에서 등록한 항목이 다른 미러에도 적용되게 하기 위함이다.
+ */
+export async function getCustomRemovedElementsForHostnames(
+  hostnames: readonly string[],
+): Promise<CustomRemovedElement[]> {
   const all = await getAllCustomRemovedElements();
-  return all[hostname] ?? [];
+  const seenSelectors = new Set<string>();
+  const merged: CustomRemovedElement[] = [];
+  for (const hostname of hostnames) {
+    for (const element of all[hostname] ?? []) {
+      if (seenSelectors.has(element.selector)) continue;
+      seenSelectors.add(element.selector);
+      merged.push(element);
+    }
+  }
+  return merged;
 }
 
 export async function getAllCustomRemovedElements(): Promise<Record<string, CustomRemovedElement[]>> {

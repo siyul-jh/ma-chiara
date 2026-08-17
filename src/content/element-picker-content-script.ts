@@ -14,7 +14,7 @@
 import {
   addCustomRemovedElement,
   createDomainRuleEntry,
-  getCustomRemovedElements,
+  getCustomRemovedElementsForHostnames,
   getDomainRules,
   getEnabled,
   type DomainRuleEntry,
@@ -246,7 +246,11 @@ async function reapplyPersistedSelectors(): Promise<void> {
   if (!enabled || entry?.allOff) {
     return;
   }
-  const customElements = await getCustomRemovedElements(location.hostname);
+  // 미러 도메인 대응: 매칭된 패턴의 knownHostnames 전체에서 수동 제거 항목을 모은다.
+  const hostnamesForCustomElements = entry
+    ? [...new Set([...entry.knownHostnames, location.hostname])]
+    : [location.hostname];
+  const customElements = await getCustomRemovedElementsForHostnames(hostnamesForCustomElements);
   for (const { selector } of customElements) {
     await removeSelectorFromDom(selector);
   }

@@ -8,7 +8,7 @@
 
 import cosmeticCss from "../rules/cosmetic.css?raw";
 import {
-  getCustomRemovedElements,
+  getCustomRemovedElementsForHostnames,
   getDomainRules,
   getEnabled,
   onStorageChange,
@@ -219,9 +219,13 @@ async function resolveStylesForDomain(hostname: string): Promise<ResolvedStyles 
   if (entry?.allOff) return null;
 
   const disabledSelectors = entry?.disabledSelectors ?? [];
+  // 미러 도메인 대응: 매칭된 패턴의 knownHostnames 전체에서 수동 제거 항목을 모은다.
+  const hostnamesForCustomElements = entry
+    ? [...new Set([...entry.knownHostnames, hostname])]
+    : [hostname];
   const [baseCss, customElements] = await Promise.all([
     buildBaseCss(disabledSelectors),
-    getCustomRemovedElements(hostname),
+    getCustomRemovedElementsForHostnames(hostnamesForCustomElements),
   ]);
   return { baseCss, customSelectors: customElements.map((el) => el.selector), disabledSelectors };
 }
