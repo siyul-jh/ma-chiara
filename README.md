@@ -9,17 +9,34 @@ Chrome Manifest V3 확장 프로그램. 빌드 시점에 한국어 사이트용 
 - **콘텐츠(cosmetic) 차단**: List-KR·EasyList의 CSS 선택자 기반으로 광고 요소를 DOM에서 제거
 - **스크롤 잠금 자동 해제**: 광고/팝업이 남기는 `overflow: hidden` 등의 스크롤 잠금 오버레이를 감지해 해제
 - **우클릭·복사 금지 해제**: 사이트가 막아 둔 우클릭, 텍스트 선택·드래그, 복사(Ctrl/Cmd+C 포함)를 풀고 복사 시 덧붙는 "출처" 문구도 막는다. 자체 우클릭 메뉴를 쓰는 웹앱을 깨지 않도록 팝업이나 도메인 관리 목록에서 **사이트별로 켠다**(기본 꺼짐). 입력창·편집기 안에서는 동작하지 않는다
-- **요소 선택기**: 단축키(`Alt+Shift+P`, `chrome://extensions/shortcuts`에서 변경 가능)로 원하는 요소를 직접 클릭해 제거, 도메인별로 영속 저장
+- **요소 선택기**: 단축키(`Alt+Shift+X`, `chrome://extensions/shortcuts`에서 변경 가능)로 원하는 요소를 직접 클릭해 제거, 도메인별로 영속 저장
 - **도메인 관리 목록**: 자동 식별(네트워크/콘텐츠 규칙)과 수동 식별(요소 선택기) 항목을 도메인별로 통합 관리, 개별 항목 해제 또는 도메인 "전체 끄기" 지원, 와일드카드 도메인 패턴(`naver*.com`) 지원
 
-## 설치 (개발자 모드)
+## 설치
+
+### 릴리스 zip (개발자 모드)
+
+[Releases](https://github.com/siyul-jh/ma-chiara/releases)에서 `ma-chiara-<버전>.zip`을 받아 압축을 푼다. `chrome://extensions`(웨일은 `whale://extensions`)에서 개발자 모드를 켜고 "압축해제된 확장 프로그램을 로드합니다"로 푼 폴더를 선택한다.
+
+### 소스 빌드
 
 ```
 npm install
 npm run build     # 프로덕션 빌드 -> dist/
 ```
 
-`chrome://extensions`(또는 웨일의 `whale://extensions`)에서 개발자 모드를 켜고 "압축해제된 확장 프로그램을 로드합니다"로 `dist/` 폴더를 선택한다.
+위와 같은 방법으로 `dist/` 폴더를 로드한다.
+
+## 릴리스
+
+`package.json` 버전과 같은 `v<버전>` 태그를 push하면 CI(`.github/workflows/release.yml`)가 검증·빌드한 뒤 `ma-chiara-<버전>.zip`을 GitHub 릴리스에 올린다. 이 zip이 크롬 웹 스토어·웨일 스토어 제출 파일이며, 등록 양식에 넣을 문구와 스크린샷은 [`store/`](store/listing.md)에 있다.
+
+```
+npm version minor   # package.json 버전을 올리고 v<버전> 태그를 만든다
+git push --follow-tags
+```
+
+개인정보 처리방침: [PRIVACY.md](PRIVACY.md)
 
 ## 개발
 
