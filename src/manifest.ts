@@ -64,6 +64,7 @@ export default defineManifest({
       js: [
         "src/content/ad-block-content-script.ts",
         "src/content/scroll-unlock-content-script.ts",
+        "src/content/copy-unlock-content-script.ts",
         "src/content/element-picker-content-script.ts",
       ],
       run_at: "document_start",

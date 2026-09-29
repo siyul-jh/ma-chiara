@@ -17,6 +17,11 @@ export interface DomainRuleEntry {
   pattern: string;
   /** "이 도메인에서 전부 끄기" 토글. */
   allOff: boolean;
+  /**
+   * 우클릭·드래그·복사 금지 해제. 자체 우클릭 메뉴를 쓰는 웹앱을 깰 수 있어 사이트별로만 켠다.
+   * 이 필드가 생기기 전에 저장된 항목에는 없으므로 없으면 꺼짐으로 본다.
+   */
+  copyUnlock?: boolean;
   /** 사용자가 수동으로 차단 해제한 개별 네트워크(DNR) 규칙 ID들. */
   disabledRuleIds: number[];
   /** 사용자가 수동으로 다시 노출시킨 개별 콘텐츠 선택자들. */
@@ -155,6 +160,7 @@ export function createDomainRuleEntry(pattern: string): DomainRuleEntry {
   return {
     pattern,
     allOff: false,
+    copyUnlock: false,
     disabledRuleIds: [],
     disabledSelectors: [],
     knownHostnames: [],
@@ -192,6 +198,7 @@ export async function renameDomainRule(
   const merged: DomainRuleEntry = {
     pattern: newPattern,
     allOff: entry.allOff || (target?.allOff ?? false),
+    copyUnlock: Boolean(entry.copyUnlock || target?.copyUnlock),
     disabledRuleIds: [...new Set([...entry.disabledRuleIds, ...(target?.disabledRuleIds ?? [])])],
     disabledSelectors: [...new Set([...entry.disabledSelectors, ...(target?.disabledSelectors ?? [])])],
     knownHostnames: [...new Set([...entry.knownHostnames, oldPattern, ...(target?.knownHostnames ?? [])])],
@@ -229,6 +236,13 @@ export async function setDomainRuleAllOff(
   allOff: boolean,
 ): Promise<Record<string, DomainRuleEntry>> {
   return updateDomainRule(pattern, (entry) => ({ ...entry, allOff }));
+}
+
+export async function setDomainRuleCopyUnlock(
+  pattern: string,
+  copyUnlock: boolean,
+): Promise<Record<string, DomainRuleEntry>> {
+  return updateDomainRule(pattern, (entry) => ({ ...entry, copyUnlock }));
 }
 
 export async function toggleDisabledRuleId(

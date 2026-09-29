@@ -5,6 +5,7 @@ import {
   getEnabled,
   onStorageChange,
   setDomainRuleAllOff,
+  setDomainRuleCopyUnlock,
   setObservedRules,
   upsertDomainRule,
   type DiscoveredNetworkRule,
@@ -101,6 +102,7 @@ export function Popup() {
   const [site, setSite] = useState<CurrentSite | undefined>(undefined);
   const [enabled, setEnabledState] = useState(true);
   const [allOff, setAllOff] = useState(false);
+  const [copyUnlock, setCopyUnlock] = useState(false);
   const [stats, setStats] = useState<DomainStats>({ networkBlocked: 0, cosmeticRemoved: 0 });
   const [loading, setLoading] = useState(true);
   const [shortcut, setShortcut] = useState<string>("");
@@ -118,6 +120,7 @@ export function Popup() {
       ? findMatchingDomainPattern(currentSite.hostname, Object.keys(domainRules))
       : undefined;
     setAllOff(matchedPattern ? Boolean(domainRules[matchedPattern]?.allOff) : false);
+    setCopyUnlock(matchedPattern ? Boolean(domainRules[matchedPattern]?.copyUnlock) : false);
     setShortcut(commands.find((c) => c.name === "toggle-element-picker")?.shortcut ?? "");
     if (currentSite) {
       setStats(await getDomainStats(currentSite.hostname));
@@ -146,6 +149,19 @@ export function Popup() {
     await setDomainRuleAllOff(pattern, nextAllOff);
     setAllOff(nextAllOff);
   }, [site, allOff]);
+
+  const handleToggleCopyUnlock = useCallback(async () => {
+    if (!site) return;
+    const domainRules = await getDomainRules();
+    const matchedPattern = findMatchingDomainPattern(site.hostname, Object.keys(domainRules));
+    const pattern = matchedPattern ?? site.hostname;
+    if (!matchedPattern) {
+      await upsertDomainRule(site.hostname);
+    }
+    const next = !copyUnlock;
+    await setDomainRuleCopyUnlock(pattern, next);
+    setCopyUnlock(next);
+  }, [site, copyUnlock]);
 
   // 네트워크 차단 수는 세지 않는다 — MV3 프로덕션에서 탭별 집계를 제공하는
   // onRuleMatchedDebug가 개발 모드 전용이라 항상 0이 된다. 0을 더해 보여주면
@@ -235,6 +251,34 @@ export function Popup() {
               />
             </label>
           </div>
+
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              padding: "9px 12px",
+              marginBottom: 12,
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 10,
+              cursor: siteActive ? "pointer" : "not-allowed",
+              opacity: siteActive ? 1 : 0.5,
+            }}
+            title="사이트가 막아 둔 우클릭, 텍스트 선택·드래그, 복사를 풀고 복사할 때 붙는 출처 문구도 막습니다. 자체 우클릭 메뉴를 쓰는 사이트에서는 그 메뉴가 사라질 수 있습니다."
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 12.5 }}>우클릭·복사 금지 해제</div>
+              <div style={{ color: COLORS.sub, fontSize: 10.5, marginTop: 2 }}>이 사이트에서만 적용</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={copyUnlock}
+              disabled={!site || !siteActive}
+              onChange={handleToggleCopyUnlock}
+              style={{ width: 16, height: 16, accentColor: COLORS.active, cursor: "inherit", flexShrink: 0 }}
+            />
+          </label>
 
           <div
             style={{

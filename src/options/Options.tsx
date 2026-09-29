@@ -13,6 +13,7 @@ import {
   removeDomainRule,
   renameDomainRule,
   setDomainRuleAllOff,
+  setDomainRuleCopyUnlock,
   setEnabled,
   toggleDisabledRuleId,
   upsertDomainRule,
@@ -491,6 +492,7 @@ function DomainRuleCard({
   observedRules,
   customElements,
   onSetAllOff,
+  onSetCopyUnlock,
   onDelete,
   onToggleRuleId,
   onRemoveCustomElement,
@@ -500,6 +502,7 @@ function DomainRuleCard({
   observedRules: Record<string, DiscoveredNetworkRule[]>;
   customElements: Record<string, CustomRemovedElement[]>;
   onSetAllOff: (pattern: string, allOff: boolean) => Promise<void>;
+  onSetCopyUnlock: (pattern: string, copyUnlock: boolean) => Promise<void>;
   onDelete: (pattern: string) => Promise<void>;
   onToggleRuleId: (pattern: string, ruleId: number, disabled: boolean) => Promise<void>;
   onRemoveCustomElement: (hostname: string, selector: string) => Promise<void>;
@@ -690,6 +693,12 @@ function DomainRuleCard({
                 label="이 도메인에서 사용"
                 tone="active"
               />
+              <ToggleSwitch
+                checked={Boolean(entry.copyUnlock)}
+                onChange={(checked) => runAction(onSetCopyUnlock(entry.pattern, checked))}
+                label="우클릭·복사 금지 해제"
+                tone="active"
+              />
               <button
                 type="button"
                 onClick={() => runAction(onDelete(entry.pattern))}
@@ -876,6 +885,7 @@ export function Options() {
                       observedRules={observedRules}
                       customElements={customElements}
                       onSetAllOff={async (p, allOff) => setDomainRulesState(await setDomainRuleAllOff(p, allOff))}
+                      onSetCopyUnlock={async (p, on) => setDomainRulesState(await setDomainRuleCopyUnlock(p, on))}
                       onDelete={async (p) => {
                         // 삭제 전에 이 항목의 알려진 호스트명(및 패턴 자체)에 대한
                         // customRemovedElements를 지운다 — 그렇지 않으면 다음
