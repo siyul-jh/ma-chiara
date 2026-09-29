@@ -960,7 +960,7 @@ export function Options() {
             <Card style={{ background: COLORS.zebra, marginBottom: 0 }}>
               <SectionHeading
                 title="필터 목록"
-                description="빌드 시점에 EasyList/EasyPrivacy에서 번들됩니다. 필터 목록은 자동으로 업데이트되지 않으며, 새로 고치려면 확장 프로그램을 다시 빌드해야 합니다 (npm run build:filters)."
+                description="빌드 시점에 List-KR(한국어 사이트)·EasyList·EasyPrivacy에서 번들됩니다. 네트워크 규칙은 확장 프로그램 새 버전과 함께 갱신되고, 콘텐츠 선택자는 하루 한 번 EasyList에서 추가로 받아옵니다."
               />
               <table style={{ fontSize: 13 }}>
                 <tbody>

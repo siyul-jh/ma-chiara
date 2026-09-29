@@ -1,5 +1,5 @@
 /**
- * 빌드 타임 필터 파이프라인: EasyList + EasyPrivacy를 다음으로 변환한다:
+ * 빌드 타임 필터 파이프라인: List-KR + EasyList + EasyPrivacy를 다음으로 변환한다:
  *   - src/rules/dnr-ruleset-*.json — 정적 declarativeNetRequest 룰셋
  *   - src/rules/cosmetic-selectors.json — 콘텐츠 스크립트/옵션 페이지가 import하는
  *     DOM 숨김용 CSS 선택자
@@ -33,6 +33,7 @@ import {
 } from "@adguard/tsurlfilter";
 import { CosmeticRuleType } from "@adguard/agtree";
 import { DeclarativeFilterConverter, Filter } from "@adguard/tsurlfilter/es/declarative-converter";
+import { preprocessFilterList } from "../src/lib/filter-preprocessor";
 
 // Chrome의 declarativeNetRequest.Rule 형태 (ruleSet.getDeclarativeRules()가
 // 반환하는 JSON과 일치한다). @adguard/tsurlfilter의 DeclarativeRule 타입이 이
@@ -82,15 +83,28 @@ const rulesOutDir = path.join(rootDir, "src", "rules");
 // 복사하는 public/ 아래 원본 파일로 둬야 한다.
 const publicRulesOutDir = path.join(rootDir, "public", "rules");
 
-// 우선순위 배분이 중요하다: EasyList(일반 광고 차단)가 주된 사용자 체감
-// 신호이므로 3만 개 규칙 예산 중 더 큰 몫을 받고, EasyPrivacy(트래커 차단)가
-// 나머지를 받는다. Chrome의 3만 개 활성-정적-규칙 상한선은 룰셋 파일별이
-// 아니라 확장 프로그램의 *활성화된* 룰셋 전체를 합산해서 적용되므로 둘이
-// 하나의 전역 예산을 공유한다.
+// 순서가 곧 우선순위다: 규칙은 이 순서대로 이어 붙여 30,000개씩 룰셋으로 자르고,
+// 기본으로 켜지는 건 앞쪽(보장 최소치) 룰셋뿐이다. 한국어 사이트용 List-KR을
+// 맨 앞에 둬야 전역 풀이 꽉 찬 환경에서도 한국 사이트 차단이 살아남는다.
+// ruleBudgetShare는 소스별 변환 상한(MAX_TOTAL_STATIC_RULES 기준 비율)이다. 2026-09 기준 실제 규칙 수
+// (List-KR 약 1.4천, EasyList 약 5만, EasyPrivacy 약 5.6만)보다 넉넉히 잡아 주간 갱신에서 잘리지 않게 한다.
 const FILTER_SOURCES = [
-  { id: 1, name: "EasyList", file: "easylist.txt", ruleBudgetShare: 0.6 },
-  { id: 2, name: "EasyPrivacy", file: "easyprivacy.txt", ruleBudgetShare: 0.4 },
+  {
+    id: 3,
+    name: "List-KR",
+    file: "list-kr.txt",
+    // AdGuard용 통합 목록. 커뮤니티가 유지보수하는 원본(List-KR/List-KR)이며, AdGuard가 포크한
+    // FilteringDev/filterslists-KO와는 다르다. 크롬에 해당하지 않는 분기는 preprocessFilterList가 걷어낸다.
+    url: "https://cdn.jsdelivr.net/npm/@list-kr/filterslists@latest/dist/filterslist-AdGuard.txt",
+    ruleBudgetShare: 0.04,
+  },
+  { id: 1, name: "EasyList", file: "easylist.txt", url: "https://easylist.to/easylist/easylist.txt", ruleBudgetShare: 0.5 },
+  { id: 2, name: "EasyPrivacy", file: "easyprivacy.txt", url: "https://easylist.to/easylist/easyprivacy.txt", ruleBudgetShare: 0.46 },
 ];
+
+const ATTRIBUTION =
+  "List-KR (https://github.com/List-KR/List-KR) — GPL-3.0; " +
+  "EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed";
 
 interface BuildStats {
   networkRulesConverted: number;
@@ -101,12 +115,11 @@ interface BuildStats {
   cosmeticRulesSkipped: number;
 }
 
-async function loadFilterSourceText(fileName: string): Promise<string> {
+async function loadFilterSourceText({ file: fileName, url }: { file: string; url: string }): Promise<string> {
   const filePath = path.join(sourcesDir, fileName);
   try {
     return await readFile(filePath, "utf8");
   } catch {
-    const url = `https://easylist.to/easylist/${fileName}`;
     console.log(`[build-filter-rules] ${fileName} not cached locally, fetching from ${url}`);
     const response = await fetch(url);
     if (!response.ok) {
@@ -145,6 +158,8 @@ function extractCosmeticSelectors(
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]?.trim();
     if (!line || line.length === 0) continue;
+    // `[`는 `[Adblock Plus]` 같은 헤더뿐 아니라 `[$path=...]domain##selector`처럼 특정 페이지에만
+    // 거는 규칙도 걸러낸다. 런타임 조회가 도메인 단위라 담으면 도메인 전체로 번지므로 의도대로 버린다.
     if (line.startsWith("!") || line.startsWith("[")) continue;
 
     let rule;
@@ -223,7 +238,7 @@ async function main() {
   const domainCosmeticSelectors = new Map<string, Set<string>>();
 
   for (const source of FILTER_SOURCES) {
-    const rawText = await loadFilterSourceText(source.file);
+    const rawText = preprocessFilterList(await loadFilterSourceText(source));
     console.log(`[build-filter-rules] Loaded ${source.name}: ${rawText.split("\n").length} lines`);
 
     const filter = new Filter(
@@ -257,6 +272,7 @@ async function main() {
       sourceRuleText.push(originalLine);
     }
     allDeclarativeRules.push(...declarativeRules);
+    console.log(`[build-filter-rules] ${source.name}: ${declarativeRules.length} network rules`);
     stats.networkRulesConverted += ruleSet.getRulesCount();
     stats.networkRegexRules += ruleSet.getRegexpRulesCount();
 
@@ -406,7 +422,7 @@ async function main() {
   const manifestMeta = {
     generatedAt: new Date().toISOString(),
     sources: FILTER_SOURCES.map((s) => s.name),
-    attribution: "EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed",
+    attribution: ATTRIBUTION,
     rulesetFileCount: rulesetChunks.length,
     // 매니페스트에서 기본으로 켤 룰셋 수. 나머지는 서비스 워커가 전역 풀
     // 가용량을 확인한 뒤 추가로 켠다.
