@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.10",
   "description": "Chrome MV3 ad remover extension: network + cosmetic ad blocking, scroll-unlock, element picker, per-domain whitelist/blacklist.",
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
