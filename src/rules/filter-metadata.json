@@ -1,26 +1,27 @@
 {
-  "generatedAt": "2026-09-26T20:42:45.807Z",
+  "generatedAt": "2026-09-29T01:07:59.394Z",
   "sources": [
+    "List-KR",
     "EasyList",
     "EasyPrivacy"
   ],
-  "attribution": "EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed",
+  "attribution": "List-KR (https://github.com/List-KR/List-KR) — GPL-3.0; EasyList & EasyPrivacy (https://easylist.to/) — dual GPL-3.0 / CC-BY-SA-3.0 licensed",
   "rulesetFileCount": 4,
   "coreRulesetCount": 1,
   "rulesetRuleCounts": [
     30000,
     30000,
     30000,
-    22892
+    17201
   ],
   "rulesPerRulesetFile": 30000,
-  "networkRulesConverted": 112892,
+  "networkRulesConverted": 107201,
   "networkRegexRules": 0,
   "networkRulesDropped": 0,
-  "cosmeticSelectorsExtracted": 13451,
-  "cosmeticDomainsExtracted": 7773,
-  "cosmeticRulesSkipped": 697,
-  "totalNetworkRules": 112892,
+  "cosmeticSelectorsExtracted": 13520,
+  "cosmeticDomainsExtracted": 8614,
+  "cosmeticRulesSkipped": 1316,
+  "totalNetworkRules": 107201,
   "coreNetworkRules": 30000,
   "totalRegexFilterRules": 0,
   "caps": {
