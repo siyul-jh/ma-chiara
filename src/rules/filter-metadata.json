@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-10T21:14:08.703Z",
+  "generatedAt": "2026-10-17T20:12:16.110Z",
   "sources": [
     "List-KR",
     "EasyList",
@@ -12,16 +12,16 @@
     30000,
     30000,
     30000,
-    20742
+    23066
   ],
   "rulesPerRulesetFile": 30000,
-  "networkRulesConverted": 110742,
+  "networkRulesConverted": 113066,
   "networkRegexRules": 0,
   "networkRulesDropped": 0,
-  "cosmeticSelectorsExtracted": 13519,
-  "cosmeticDomainsExtracted": 8643,
-  "cosmeticRulesSkipped": 1305,
-  "totalNetworkRules": 110742,
+  "cosmeticSelectorsExtracted": 13518,
+  "cosmeticDomainsExtracted": 8651,
+  "cosmeticRulesSkipped": 1309,
+  "totalNetworkRules": 113066,
   "coreNetworkRules": 30000,
   "totalRegexFilterRules": 0,
   "caps": {
